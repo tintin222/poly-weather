@@ -185,8 +185,8 @@
     let hideSettled = true; // default: hide 100% settled markets
 
     function isSettled(o) {
-      // A market is "settled" if any bracket is at 100% (price >= 0.99)
-      return o.brackets.some(b => (b.yes_price || 0) >= 0.99);
+      // A market is "settled" if closed or any bracket is at 100%
+      return o.is_closed || o.brackets.some(b => (b.yes_price || 0) >= 0.99);
     }
 
     function toggleSettled() {
@@ -415,6 +415,7 @@
             <div class="flex items-center gap-2">
               <h3 class="font-display font-semibold text-term-bright text-sm">${o.city_name}</h3>
               <span class="text-term-muted text-[11px]">${o.date}</span>
+              ${o.is_closed ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red border border-term-red/20">CLOSED</span>' : ''}
               ${historyBadge}
             </div>
             <div class="flex items-center gap-3">
@@ -461,11 +462,12 @@
     // ---- Init ----
     loadOpportunities();
 
-    // Auto-reload every 30s to pick up completed scrapes/backfills
+    // Auto-reload: every 60s always (prices update), every 15s if scrapes running
     setInterval(() => {
       const hasRunning = opportunities.some(o => o.auto_backfill_running || !o.weather);
       if (hasRunning) loadOpportunities();
-    }, 30000);
+    }, 15000);
+    setInterval(() => loadOpportunities(), 60000);
   </script>
 
 </body>

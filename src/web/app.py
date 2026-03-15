@@ -501,26 +501,30 @@ async def api_opportunities():
         slug = event["slug"]
         polymarket_url = f"https://polymarket.com/event/{slug}" if slug else None
 
+        event_status = event["status"]
+
         opportunities.append({
-            "event_id": event["event_id"],
-            "city_key": city_key,
-            "city_name": city.display_name if city else city_key,
-            "date": event_date,
-            "title": event["title"],
-            "slug": slug,
-            "polymarket_url": polymarket_url,
-            "is_today": is_today,
-            "current_hour": current_hour if is_today else None,
-            "timezone": city.timezone if city else None,
-            "unit": city.unit if city else "celsius",
-            "brackets": bracket_list,
-            "weather": weather_data,
-            "peak_info": peak_info,
-            "confidence": confidence_info,
-            "recommendation": recommendation,
-            "guidance": guidance_data if observations else None,
-            "auto_backfill_running": auto_backfill_running,
-        })
+                "event_id": event["event_id"],
+                "city_key": city_key,
+                "city_name": city.display_name if city else city_key,
+                "date": event_date,
+                "title": event["title"],
+                "slug": slug,
+                "polymarket_url": polymarket_url,
+                "status": event_status,
+                "is_today": is_today,
+                "is_closed": event_status == "closed",
+                "current_hour": current_hour if is_today else None,
+                "timezone": city.timezone if city else None,
+                "unit": city.unit if city else "celsius",
+                "brackets": bracket_list,
+                "weather": weather_data,
+                "peak_info": peak_info,
+                "confidence": confidence_info,
+                "recommendation": recommendation,
+                "guidance": guidance_data if observations else None,
+                "auto_backfill_running": auto_backfill_running,
+            })
 
     # Sort: today's events first, then by city
     opportunities.sort(key=lambda o: (not o["is_today"], o["date"], o["city_key"]))

@@ -22,24 +22,31 @@ class MarketMonitor:
         self._market_repo = market_repo
 
     async def poll_temperature_events(self) -> int:
-        """Fetch active temperature events and store/update them in the DB.
+        """Fetch temperature events (active + recently closed) and update DB.
 
         Returns:
             Number of events processed.
         """
-        events = await gamma_api.get_temperature_events(active_only=True)
-        log.info("polled_temperature_events", count=len(events))
+        # Fetch both active and closed events to catch settlements
+        active_events = await gamma_api.get_temperature_events(active_only=True)
+        closed_events = await gamma_api.get_temperature_events(active_only=False, limit=50)
+
+        # Merge: active events + any closed events not in active set
+        active_ids = {e.event_id for e in active_events}
+        all_events = list(active_events)
+        for e in closed_events:
+            if e.event_id not in active_ids:
+                all_events.append(e)
+
+        log.info("polled_temperature_events", active=len(active_events), closed=len(closed_events) - len(active_events))
 
         processed = 0
-        for event in events:
+        for event in all_events:
             parsed = parse_city_and_date(event)
             if parsed is None:
-                log.debug("skipping_unparseable_event", event_id=event.event_id, title=event.title)
                 continue
 
             city_display, date_str = parsed
-
-            # Try to match to a known city
             city_config = get_city(city_display)
             city_key = city_config.key if city_config else city_display
 
@@ -62,7 +69,7 @@ class MarketMonitor:
                 total_liquidity=float(event.liquidity) if event.liquidity else None,
             )
 
-            # Parse and store brackets
+            # Parse and store brackets with Gamma API prices (primary source)
             brackets = parse_brackets(event)
             for bracket in brackets:
                 self._market_repo.upsert_bracket(
@@ -78,6 +85,19 @@ class MarketMonitor:
                 )
 
             processed += 1
+
+        # Mark any DB events as closed if they're no longer in the active set
+        db_active = self._market_repo.get_active_events()
+        for db_event in db_active:
+            if db_event["event_id"] not in active_ids:
+                self._market_repo.upsert_event(
+                    event_id=db_event["event_id"],
+                    city_key=db_event["city_key"],
+                    date=db_event["date"],
+                    title=db_event["title"],
+                    slug=db_event["slug"],
+                    status="closed",
+                )
 
         log.info("events_processed", count=processed)
         return processed

@@ -124,29 +124,30 @@ class EVEvaluator:
         # Remove degree symbols and unit
         cleaned = label.replace("°C", "").replace("°F", "").strip()
 
-        # "X or higher" - temp must be >= X
+        rounded = round(temp)
+
+        # "X or higher" - rounded temp must be >= X
         if "or higher" in label_lower:
             nums = re.findall(r"-?\d+\.?\d*", cleaned)
             if nums:
-                return temp >= float(nums[0])
+                return rounded >= round(float(nums[0]))
 
-        # "X or below" - temp must be <= X
+        # "X or below" - rounded temp must be <= X
         if "or below" in label_lower:
             nums = re.findall(r"-?\d+\.?\d*", cleaned)
             if nums:
-                return temp <= float(nums[0])
+                return rounded <= round(float(nums[0]))
 
         # Range: "X-Y" (e.g., "42-43")
         range_match = re.match(r"(-?\d+\.?\d*)\s*[-–]\s*(-?\d+\.?\d*)", cleaned)
         if range_match:
-            low, high = float(range_match.group(1)), float(range_match.group(2))
-            return low <= temp <= high
+            low, high = round(float(range_match.group(1))), round(float(range_match.group(2)))
+            return low <= rounded <= high
 
         # Exact match: "14" means temp rounds to 14
         nums = re.findall(r"-?\d+\.?\d*", cleaned)
         if nums:
-            bracket_val = float(nums[0])
-            return round(temp) == round(bracket_val)
+            return rounded == round(float(nums[0]))
 
         return False
 

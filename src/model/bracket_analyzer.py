@@ -76,29 +76,87 @@ def parse_bracket_range(label: str) -> tuple[float | None, float | None]:
 
 
 def temp_in_bracket(temp: float, low: float | None, high: float | None) -> bool:
-    """Check if a temperature falls within a bracket range."""
+    """Check if a temperature falls within a bracket range.
+
+    Uses rounding to match how Polymarket resolves:
+    - "14°C" means the daily high rounds to 14 (13.5-14.4°C)
+    - "6°C or below" means round(high) <= 6
+    - "16°C or higher" means round(high) >= 16
+    - "42-43°F" means round(high) is 42 or 43
+    """
+    rounded = round(temp)
     if low is None and high is not None:
-        return temp <= high
+        return rounded <= round(high)
     if high is None and low is not None:
-        return temp >= low
+        return rounded >= round(low)
     if low is not None and high is not None:
-        return low <= temp <= high
+        if low == high:  # single value bracket like "14°C"
+            return rounded == round(low)
+        else:  # range bracket like "42-43°F"
+            return round(low) <= rounded <= round(high)
     return False
+
+
+def _forecast_probability(
+    forecast_high: float,
+    low: float | None,
+    high: float | None,
+    std: float = 1.5,
+) -> float:
+    """Compute probability of a bracket given a forecast high.
+
+    Models forecast error as a normal distribution centered at forecast_high
+    with standard deviation `std` (default 1.5°C).
+    """
+    from scipy.stats import norm
+
+    # For "X or below"
+    if low is None and high is not None:
+        return float(norm.cdf(high + 0.5, loc=forecast_high, scale=std))
+
+    # For "X or higher"
+    if high is None and low is not None:
+        return float(1 - norm.cdf(low - 0.5, loc=forecast_high, scale=std))
+
+    if low is not None and high is not None:
+        if low == high:
+            # Single bracket "14°C" → range [13.5, 14.5)
+            return float(
+                norm.cdf(low + 0.5, loc=forecast_high, scale=std)
+                - norm.cdf(low - 0.5, loc=forecast_high, scale=std)
+            )
+        else:
+            # Range bracket "42-43°F" → range [42, 44)
+            return float(
+                norm.cdf(high + 0.5, loc=forecast_high, scale=std)
+                - norm.cdf(low - 0.5, loc=forecast_high, scale=std)
+            )
+
+    return 0.0
 
 
 def compute_bracket_probabilities(
     historical_peaks: list[float],
     brackets: list[dict],
+    forecast_high: float | None = None,
 ) -> list[BracketEdge]:
-    """Compute probability for each bracket based on historical peak temps.
+    """Compute probability for each bracket.
 
-    For each bracket, counts how many historical days had their peak fall
-    within that bracket's range. This gives us P(max in bracket).
+    Uses a blend of:
+    - WU forecast high (if available): 70% weight, modeled as normal distribution
+    - Historical peak distribution: 30% weight (or 100% if no forecast)
     """
-    if not historical_peaks or not brackets:
+    if not brackets:
         return []
 
-    n = len(historical_peaks)
+    has_history = bool(historical_peaks) and len(historical_peaks) >= 3
+    has_forecast = forecast_high is not None
+    n = len(historical_peaks) if has_history else 0
+
+    # Weights
+    forecast_weight = 0.7 if has_forecast and has_history else (1.0 if has_forecast else 0.0)
+    history_weight = 1.0 - forecast_weight
+
     results = []
 
     for b in brackets:
@@ -106,16 +164,21 @@ def compute_bracket_probabilities(
         market_price = b.get("yes_price") or b.get("current_yes_price") or 0
         low, high = parse_bracket_range(label)
 
-        # Count how many historical peaks fall in this bracket
-        count = sum(1 for t in historical_peaks if temp_in_bracket(t, low, high))
-        our_prob = count / n if n > 0 else 0
+        # Historical probability
+        hist_prob = 0.0
+        if has_history:
+            count = sum(1 for t in historical_peaks if temp_in_bracket(t, low, high))
+            hist_prob = count / n
 
-        # Edge = our probability - market implied probability
+        # Forecast probability
+        fc_prob = 0.0
+        if has_forecast:
+            fc_prob = _forecast_probability(forecast_high, low, high)
+
+        # Blend
+        our_prob = forecast_weight * fc_prob + history_weight * hist_prob
+
         edge = our_prob - market_price
-        # EV per dollar: if we buy at market_price and win with prob our_prob
-        # profit = (1 - market_price) * our_prob - market_price * (1 - our_prob)
-        # = our_prob - market_price
-        ev_per_dollar = edge
 
         if edge > 0.05 and our_prob >= 0.05:
             verdict = "BUY"
@@ -129,7 +192,7 @@ def compute_bracket_probabilities(
             our_probability=round(our_prob, 4),
             market_probability=round(market_price, 4),
             edge=round(edge, 4),
-            ev_per_dollar=round(ev_per_dollar, 4),
+            ev_per_dollar=round(edge, 4),
             verdict=verdict,
         ))
 
@@ -152,6 +215,7 @@ def generate_guidance(
     current_hour: int | None = None,
     confidence_peak_passed: float | None = None,
     unit: str = "celsius",
+    forecast_high: float | None = None,
 ) -> BracketGuidance:
     """Generate full betting guidance for a city.
 
@@ -179,7 +243,7 @@ def generate_guidance(
         avg_high = median_high = min_high = max_high = 0.0
 
     # Compute bracket probabilities
-    bracket_edges = compute_bracket_probabilities(historical_peaks, brackets)
+    bracket_edges = compute_bracket_probabilities(historical_peaks, brackets, forecast_high=forecast_high)
 
     # Find predicted bracket (highest our_probability)
     predicted_bracket = None
@@ -194,9 +258,12 @@ def generate_guidance(
     # Build summary
     summary_parts = []
 
+    if forecast_high is not None:
+        summary_parts.append(f"WU Forecast high: {forecast_high:.0f}{unit_symbol}")
+
     if historical_peaks:
         summary_parts.append(
-            f"Historical high (30d): avg {avg_high:.0f}{unit_symbol}, "
+            f"30d avg: {avg_high:.0f}{unit_symbol}, "
             f"range {min_high:.0f}-{max_high:.0f}{unit_symbol}"
         )
 

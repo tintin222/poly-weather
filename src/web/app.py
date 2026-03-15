@@ -94,6 +94,9 @@ def _auto_backfill_if_needed(city_key: str) -> str | None:
 
 # Track which cities have been auto-scraped today
 _scrape_started: set[str] = set()
+# Cache forecast highs per city (scraped once per session)
+_forecasts: dict[str, float] = {}
+_forecast_started: set[str] = set()
 
 
 def _auto_scrape_if_needed(city_key: str, city, event_date: str) -> str | None:
@@ -127,6 +130,34 @@ def _auto_scrape_if_needed(city_key: str, city, event_date: str) -> str | None:
     log.info("auto_scrape_started", city=city_key, date=today, job_id=job_id)
     asyncio.create_task(_run_scrape_job(job_id, city, today))
     return job_id
+
+
+def _auto_forecast_if_needed(city_key: str, city) -> None:
+    """Auto-scrape today's WU forecast high for a city if not done yet."""
+    if city_key in _forecast_started:
+        return
+    _forecast_started.add(city_key)
+    asyncio.create_task(_run_forecast_job(city_key, city))
+
+
+async def _run_forecast_job(city_key: str, city) -> None:
+    """Background task: scrape WU forecast high."""
+    from src.weather.scraper import WUScraper
+
+    async with _scrape_semaphore:
+        try:
+            scraper = WUScraper(headless=True)
+            await scraper.start()
+            try:
+                forecast_high = await scraper.scrape_forecast_high(city)
+            finally:
+                await scraper.stop()
+
+            if forecast_high is not None:
+                _forecasts[city_key] = forecast_high
+                log.info("forecast_cached", city=city_key, forecast_high=forecast_high)
+        except Exception as exc:
+            log.warning("forecast_job_failed", city=city_key, error=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +391,10 @@ async def api_opportunities():
         # Auto-scrape today if we don't have observations yet
         _auto_scrape_if_needed(city_key, city, event_date)
 
+        # Auto-scrape forecast if not cached yet
+        if is_today:
+            _auto_forecast_if_needed(city_key, city)
+
         # Get weather observations
         observations = weather_repo.get_hourly_observations(city_key, event_date)
         weather_data = None
@@ -427,6 +462,9 @@ async def api_opportunities():
         }
 
         # Generate guidance — ALWAYS when we have brackets, regardless of WU data
+        # Check if we have a cached forecast for this city
+        forecast_high = _forecasts.get(city_key)
+
         guidance_data = None
         if hist_peak_temps and len(hist_peak_temps) >= 3:
             # Have some history: use edge analysis
@@ -440,9 +478,11 @@ async def api_opportunities():
                     current_hour=current_hour if is_today else None,
                     confidence_peak_passed=confidence_info["confidence"] if confidence_info else None,
                     unit=city.unit if city else "celsius",
+                    forecast_high=forecast_high,
                 )
                 guidance_data = {
                     "summary": guidance.summary,
+                    "forecast_high": forecast_high,
                     "historical_avg_high": guidance.historical_avg_high,
                     "historical_median_high": guidance.historical_median_high,
                     "historical_range": f"{guidance.historical_min_high}-{guidance.historical_max_high}",

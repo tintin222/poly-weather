@@ -309,8 +309,9 @@
 
         // Historical context
         let histHTML = `
-          <div class="flex items-center gap-4 text-[11px] mb-2 px-1">
-            <div><span class="text-term-muted">30d avg high:</span> <span class="text-term-amber font-bold">${g.historical_avg_high}${unit}</span></div>
+          <div class="flex items-center gap-4 text-[11px] mb-2 px-1 flex-wrap">
+            ${g.forecast_high != null ? `<div><span class="text-term-muted">WU Forecast:</span> <span class="text-term-green font-bold text-sm">${g.forecast_high}${unit}</span></div>` : ''}
+            <div><span class="text-term-muted">30d avg:</span> <span class="text-term-amber font-bold">${g.historical_avg_high}${unit}</span></div>
             <div><span class="text-term-muted">range:</span> <span class="text-term-text">${g.historical_range}${unit}</span></div>
             ${g.predicted_bracket ? `<div><span class="text-term-muted">most likely:</span> <span class="text-term-cyan font-bold">${g.predicted_bracket}</span></div>` : ''}
           </div>`;

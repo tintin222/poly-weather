@@ -14,6 +14,7 @@ from src.weather.models import HourlyObservation
 log = get_logger(__name__)
 
 BASE_URL = "https://www.wunderground.com/history/daily"
+FORECAST_URL = "https://www.wunderground.com/hourly"
 
 
 def _parse_time_to_hour(time_str: str) -> int:
@@ -300,6 +301,70 @@ class WUScraper:
                 condition=obs.condition,
             ))
         return converted
+
+    async def scrape_forecast_high(self, city: CityConfig) -> float | None:
+        """Scrape today's forecast high from WU hourly forecast page.
+
+        Args:
+            city: CityConfig for the target city.
+
+        Returns:
+            Forecast high temperature (in city's unit), or None if scraping fails.
+        """
+        if not self._context:
+            raise RuntimeError("Scraper not started. Call .start() first.")
+
+        url = f"{FORECAST_URL}/{city.wu_url_path}"
+        log.info("scraping_forecast", city=city.key, url=url)
+
+        page = await self._context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.wait_for_selector("table", timeout=15000)
+
+            # Extract all temperature values from the hourly forecast table
+            temps = await page.evaluate("""
+                () => {
+                    const tables = document.querySelectorAll('table');
+                    const temps = [];
+                    for (const table of tables) {
+                        const headers = Array.from(table.querySelectorAll('thead th, thead td'))
+                            .map(h => h.textContent.trim().toLowerCase());
+                        const tempIdx = headers.findIndex(h => h.includes('temp'));
+                        if (tempIdx < 0) continue;
+                        const rows = table.querySelectorAll('tbody tr');
+                        for (const row of rows) {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length > tempIdx) {
+                                const text = cells[tempIdx].textContent.trim();
+                                const match = text.match(/-?\\d+/);
+                                if (match) temps.push(parseInt(match[0]));
+                            }
+                        }
+                    }
+                    return temps;
+                }
+            """)
+
+            if not temps:
+                log.warning("no_forecast_temps", city=city.key)
+                return None
+
+            forecast_high = max(temps)
+
+            # WU forecast page shows Celsius for non-US cities already
+            # but if city is celsius and temps seem to be in F, convert
+            if city.unit == "celsius" and forecast_high > 50:
+                forecast_high = round((forecast_high - 32) * 5 / 9)
+
+            log.info("forecast_scraped", city=city.key, forecast_high=forecast_high, readings=len(temps))
+            return float(forecast_high)
+
+        except Exception as exc:
+            log.warning("forecast_scrape_failed", city=city.key, error=str(exc))
+            return None
+        finally:
+            await page.close()
 
     def _map_columns(self, headers: list[str]) -> dict[str, int]:
         """Map column names to indices based on header text."""

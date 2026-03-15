@@ -77,6 +77,12 @@ class HistoricalLoader:
             target_date = today - timedelta(days=i)
             date_str = target_date.strftime("%Y-%m-%d")
 
+            # Skip if we already have data for this day
+            existing = self._repo.get_daily_peak(city.key, date_str)
+            if existing:
+                log.debug("backfill_skip_existing", city=city.key, date=date_str)
+                continue
+
             try:
                 observations = await self._scraper.scrape_daily(city, date_str)
 
@@ -111,6 +117,9 @@ class HistoricalLoader:
                     error=str(exc),
                 )
 
+            # Rate limiting after each actual scrape
+            await asyncio.sleep(RATE_LIMIT_SECONDS)
+
             # Progress logging
             if i % PROGRESS_LOG_INTERVAL == 0:
                 log.info(
@@ -121,10 +130,6 @@ class HistoricalLoader:
                     observations_stored=total_stored,
                     failures=total_failed,
                 )
-
-            # Rate limiting (skip on last iteration)
-            if i < days:
-                await asyncio.sleep(RATE_LIMIT_SECONDS)
 
         log.info(
             "backfill_complete",

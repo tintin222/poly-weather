@@ -14,8 +14,8 @@ from src.weather.scraper import WUScraper
 
 log = get_logger(__name__)
 
-# Rate limit: seconds between page loads
-RATE_LIMIT_SECONDS = 10
+# Rate limit: seconds between page loads (WU handles 3s fine)
+RATE_LIMIT_SECONDS = 3
 
 # Log progress every N days
 PROGRESS_LOG_INTERVAL = 10

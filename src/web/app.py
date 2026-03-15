@@ -29,8 +29,8 @@ _db: Database | None = None
 _jobs: dict[str, dict] = {}
 # Track which cities already have a backfill running/completed this session
 _backfill_started: set[str] = set()
-# Semaphore: only 1 Playwright browser at a time to avoid resource contention
-_scrape_semaphore = asyncio.Semaphore(1)
+# Separate semaphores: today scrapes don't block on backfills
+_scrape_semaphore = asyncio.Semaphore(2)  # 2 concurrent: 1 scrape + 1 backfill
 
 
 def get_db() -> Database:
@@ -368,6 +368,7 @@ async def api_opportunities():
         recommendation = None
         auto_backfill_running = backfill_job_id is not None
 
+        max_temp = None
         if observations:
             max_temp, peak_hour = compute_current_max(observations)
             weather_data = {
@@ -378,110 +379,64 @@ async def api_opportunities():
                 "latest_temp": observations[-1]["temperature"],
             }
 
-            # Get historical peaks count
-            hist_peaks = db.conn.execute(
-                "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
-                (city_key,),
-            ).fetchone()["cnt"]
+        # Get historical peaks (works even without today's observations)
+        hist_peaks_count = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
 
-            # Always find which bracket the current temp maps to
+        hist_peak_temps = [
+            r["peak_temp"] for r in db.conn.execute(
+                "SELECT peak_temp FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
+                (city_key,),
+            ).fetchall()
+        ]
+
+        # Find matching bracket if we have today's temp
+        matching_label = None
+        matching_price = 0
+        if max_temp is not None:
             matching = evaluator.find_matching_bracket(
                 max_temp, [dict(b) for b in brackets]
             )
-            matching_label = matching["bracket_label"] if matching else None
-            matching_price = (matching.get("current_yes_price", 0) or 0) if matching else 0
+            if matching:
+                matching_label = matching["bracket_label"]
+                matching_price = matching.get("current_yes_price", 0) or 0
 
-            if hist_peaks >= 5:
-                try:
-                    predictor.train(city_key, event_date, window_days=15, years_back=1)
-                    prediction = predictor.predict_confidence(
-                        city_key, current_hour, max_temp, observations
-                    )
-                    confidence_info = {
-                        "confidence": round(prediction.confidence, 4),
-                        "base_confidence": round(prediction.base_confidence, 4),
-                        "mean_peak_hour": round(prediction.mean_peak_hour, 1),
-                        "hours_past_mean": round(prediction.hours_past_mean, 1),
-                    }
-
-                    # Build recommendation with clear explanation
-                    if matching and matching_price > 0:
-                        decision = evaluator.evaluate(
-                            confidence=prediction.confidence,
-                            market_price=matching_price,
-                            current_max_temp=max_temp,
-                            bracket_label=matching["bracket_label"],
-                        )
-                        recommendation = {
-                            "action": decision.action,
-                            "reason": decision.reason,
-                            "bracket_label": matching["bracket_label"],
-                            "bracket_id": matching["id"],
-                            "market_price": matching_price,
-                            "expected_value": round(decision.expected_value, 4),
-                            "kelly_fraction": round(decision.kelly_fraction, 4),
-                            "token_id_yes": matching.get("clob_token_id_yes"),
-                        }
-                    elif matching and matching_price <= 0:
-                        recommendation = {
-                            "action": "WAIT",
-                            "reason": f"Matching bracket '{matching_label}' has no market price yet (0¢). Market may not have liquidity.",
-                            "bracket_label": matching_label,
-                            "bracket_id": matching["id"] if matching else None,
-                            "market_price": 0,
-                            "expected_value": 0,
-                            "kelly_fraction": 0,
-                            "token_id_yes": matching.get("clob_token_id_yes") if matching else None,
-                        }
-                    else:
-                        # Current temp doesn't match any bracket
-                        recommendation = {
-                            "action": "WAIT",
-                            "reason": f"Current peak {max_temp}° doesn't match any bracket. Temp may still change.",
-                            "bracket_label": None,
-                            "bracket_id": None,
-                            "market_price": 0,
-                            "expected_value": 0,
-                            "kelly_fraction": 0,
-                            "token_id_yes": None,
-                        }
-                except Exception as exc:
-                    log.warning("opportunity_analysis_error", city=city_key, error=str(exc))
-            else:
-                # Not enough history for model
-                recommendation = {
-                    "action": "WAIT",
-                    "reason": f"Need ≥5 days of history (have {hist_peaks}). Backfilling...",
-                    "bracket_label": matching_label,
-                    "bracket_id": matching["id"] if matching else None,
-                    "market_price": matching_price,
-                    "expected_value": 0,
-                    "kelly_fraction": 0,
-                    "token_id_yes": None,
+        # Confidence analysis (requires observations + history)
+        if observations and hist_peaks_count >= 5:
+            try:
+                predictor.train(city_key, event_date, window_days=15, years_back=1)
+                prediction = predictor.predict_confidence(
+                    city_key, current_hour, max_temp, observations
+                )
+                confidence_info = {
+                    "confidence": round(prediction.confidence, 4),
+                    "base_confidence": round(prediction.base_confidence, 4),
+                    "mean_peak_hour": round(prediction.mean_peak_hour, 1),
+                    "hours_past_mean": round(prediction.hours_past_mean, 1),
                 }
+            except Exception as exc:
+                log.warning("confidence_error", city=city_key, error=str(exc))
 
-            peak_info = {
-                "historical_days": hist_peaks,
-                "has_history": hist_peaks >= 5,
-                "matching_bracket": matching_label,
-                "matching_price": matching_price,
-            }
+        peak_info = {
+            "historical_days": hist_peaks_count,
+            "has_history": hist_peaks_count >= 5,
+            "matching_bracket": matching_label,
+            "matching_price": matching_price,
+        }
 
-            # Generate bracket-level guidance with edge analysis
-            hist_peak_temps = [
-                r["peak_temp"] for r in db.conn.execute(
-                    "SELECT peak_temp FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
-                    (city_key,),
-                ).fetchall()
-            ]
-
-            if hist_peak_temps and len(hist_peak_temps) >= 5:
+        # Generate guidance — ALWAYS when we have brackets, regardless of WU data
+        guidance_data = None
+        if hist_peak_temps and len(hist_peak_temps) >= 3:
+            # Have some history: use edge analysis
+            try:
                 guidance = generate_guidance(
                     city_key=city_key,
                     date=event_date,
                     historical_peaks=hist_peak_temps,
                     brackets=bracket_list,
-                    current_temp=max_temp if observations else None,
+                    current_temp=max_temp,
                     current_hour=current_hour if is_today else None,
                     confidence_peak_passed=confidence_info["confidence"] if confidence_info else None,
                     unit=city.unit if city else "celsius",
@@ -511,8 +466,8 @@ async def api_opportunities():
                         for be in guidance.brackets
                     ],
                 }
-            else:
-                guidance_data = None
+            except Exception as exc:
+                log.warning("guidance_error", city=city_key, error=str(exc))
 
         slug = event["slug"]
         polymarket_url = f"https://polymarket.com/event/{slug}" if slug else None
@@ -538,7 +493,7 @@ async def api_opportunities():
                 "peak_info": peak_info,
                 "confidence": confidence_info,
                 "recommendation": recommendation,
-                "guidance": guidance_data if observations else None,
+                "guidance": guidance_data,
                 "auto_backfill_running": auto_backfill_running,
             })
 

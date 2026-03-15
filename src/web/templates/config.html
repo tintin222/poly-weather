@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // config</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; }
+    input[type="number"] { background: #0a0e14; border: 1px solid #1a2030; color: #c5d4e8; padding: 8px 12px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 14px; }
+    input[type="number"]:focus { outline: none; border-color: #00c8ff; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/config" class="text-term-cyan">Config</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="p-4 max-w-[800px] mx-auto space-y-6">
+
+    <!-- Account Summary -->
+    <div class="card rounded-md p-6" id="account-summary">
+      <h2 class="font-display font-semibold text-term-bright text-lg mb-4">Paper Trading Account</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="balance-cards">
+        <div class="text-center">
+          <div class="text-term-muted text-[10px] uppercase tracking-wider">Balance</div>
+          <div class="text-2xl font-display font-bold text-term-bright" id="bal-current">--</div>
+        </div>
+        <div class="text-center">
+          <div class="text-term-muted text-[10px] uppercase tracking-wider">P&L</div>
+          <div class="text-2xl font-display font-bold" id="bal-pnl">--</div>
+        </div>
+        <div class="text-center">
+          <div class="text-term-muted text-[10px] uppercase tracking-wider">Win Rate</div>
+          <div class="text-2xl font-display font-bold text-term-bright" id="bal-winrate">--</div>
+        </div>
+        <div class="text-center">
+          <div class="text-term-muted text-[10px] uppercase tracking-wider">Bets</div>
+          <div class="text-2xl font-display font-bold text-term-bright" id="bal-bets">--</div>
+        </div>
+      </div>
+      <div class="mt-4 text-[11px] text-term-muted" id="bal-detail"></div>
+    </div>
+
+    <!-- Config Form -->
+    <div class="card rounded-md p-6">
+      <h2 class="font-display font-semibold text-term-bright text-lg mb-4">Settings</h2>
+      <form id="config-form" class="space-y-4">
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="text-[11px] text-term-muted uppercase tracking-wider block mb-1">Initial Balance ($)</label>
+            <input type="number" id="cfg-balance" step="100" min="0" value="1000">
+            <div class="text-[10px] text-term-muted mt-1">Starting paper trading balance</div>
+          </div>
+          <div>
+            <label class="text-[11px] text-term-muted uppercase tracking-wider block mb-1">Bet Size ($)</label>
+            <input type="number" id="cfg-betsize" step="1" min="1" value="10">
+            <div class="text-[10px] text-term-muted mt-1">Fixed amount per trade</div>
+          </div>
+          <div>
+            <label class="text-[11px] text-term-muted uppercase tracking-wider block mb-1">Max Daily Exposure ($)</label>
+            <input type="number" id="cfg-maxdaily" step="10" min="0" value="200">
+            <div class="text-[10px] text-term-muted mt-1">Max total bets per day</div>
+          </div>
+          <div>
+            <label class="text-[11px] text-term-muted uppercase tracking-wider block mb-1">Min Edge (%)</label>
+            <input type="number" id="cfg-minedge" step="1" min="1" max="50" value="5">
+            <div class="text-[10px] text-term-muted mt-1">Min edge to place auto-bet (our% - market%)</div>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-4">
+          <button type="submit" class="px-4 py-2 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[12px] font-medium hover:bg-term-cyan/20">
+            Save Settings
+          </button>
+          <button type="button" onclick="resetAccount()" class="px-4 py-2 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[12px] font-medium hover:bg-term-red/20">
+            Reset Account (Delete All Bets)
+          </button>
+        </div>
+      </form>
+      <div id="save-msg" class="mt-2 text-[11px] hidden"></div>
+    </div>
+
+    <!-- Recent Bets -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border">
+        <h2 class="font-display font-semibold text-term-bright text-sm">Bet History</h2>
+      </div>
+      <div class="overflow-auto max-h-[400px]" id="bet-history">
+        <div class="p-4 text-term-muted text-center">Loading...</div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    async function loadAccount() {
+      const res = await fetch('/api/paper-account');
+      const data = await res.json();
+
+      // Balance cards
+      const b = data.balance;
+      document.getElementById('bal-current').textContent = `$${b.current.toFixed(2)}`;
+      const pnlEl = document.getElementById('bal-pnl');
+      pnlEl.textContent = `${b.realized_pnl >= 0 ? '+' : ''}$${b.realized_pnl.toFixed(2)}`;
+      pnlEl.className = `text-2xl font-display font-bold ${b.realized_pnl >= 0 ? 'text-term-green' : 'text-term-red'}`;
+
+      const s = data.stats;
+      document.getElementById('bal-winrate').textContent = s.total_bets > 0 ? `${s.win_rate}%` : '--';
+      document.getElementById('bal-bets').textContent = `${s.total_bets}`;
+      document.getElementById('bal-detail').textContent =
+        `Invested: $${b.total_invested.toFixed(2)} | Won: $${b.total_winnings.toFixed(2)} | Pending: $${b.pending_cost.toFixed(2)} | W/L/P: ${s.won}/${s.lost}/${s.pending}`;
+
+      // Config form
+      const c = data.config;
+      document.getElementById('cfg-balance').value = c.initial_balance;
+      document.getElementById('cfg-betsize').value = c.bet_size;
+      document.getElementById('cfg-maxdaily').value = c.max_daily_exposure;
+      document.getElementById('cfg-minedge').value = (c.min_edge * 100).toFixed(0);
+
+      // Bet history
+      renderBets(data.bets);
+    }
+
+    function renderBets(bets) {
+      const el = document.getElementById('bet-history');
+      if (!bets.length) {
+        el.innerHTML = '<div class="p-8 text-term-muted text-center text-sm">No bets placed yet. The bot will auto-bet when it finds edges above your min threshold.</div>';
+        return;
+      }
+
+      let html = '<table class="w-full text-[11px]"><thead><tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">';
+      html += '<th class="px-4 py-2">City</th><th class="px-2 py-2">Date</th><th class="px-2 py-2">Bracket</th>';
+      html += '<th class="px-2 py-2 text-right">Price</th><th class="px-2 py-2 text-right">Cost</th>';
+      html += '<th class="px-2 py-2 text-right">Edge</th><th class="px-2 py-2 text-center">Result</th>';
+      html += '<th class="px-2 py-2 text-right">P&L</th></tr></thead><tbody>';
+
+      bets.forEach(b => {
+        const edge = (b.expected_value * 100).toFixed(0);
+        const resultClass = b.won === 1 ? 'text-term-green' : b.won === 0 ? 'text-term-red' : 'text-term-amber';
+        const resultText = b.won === 1 ? 'WON' : b.won === 0 ? 'LOST' : 'PENDING';
+        const pnl = b.pnl != null ? `${b.pnl >= 0 ? '+' : ''}$${b.pnl.toFixed(2)}` : '--';
+
+        html += `<tr class="border-t border-term-border/30">
+          <td class="px-4 py-2 text-term-bright">${b.city_key}</td>
+          <td class="px-2 py-2 text-term-muted">${b.date}</td>
+          <td class="px-2 py-2"><span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">${b.bracket_label}</span></td>
+          <td class="px-2 py-2 text-right">${(b.price * 100).toFixed(0)}¢</td>
+          <td class="px-2 py-2 text-right">$${b.cost.toFixed(2)}</td>
+          <td class="px-2 py-2 text-right text-term-green">+${edge}%</td>
+          <td class="px-2 py-2 text-center"><span class="${resultClass} font-bold">${resultText}</span></td>
+          <td class="px-2 py-2 text-right font-bold ${b.pnl > 0 ? 'text-term-green' : b.pnl < 0 ? 'text-term-red' : ''}">${pnl}</td>
+        </tr>`;
+      });
+
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+
+    document.getElementById('config-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const params = new URLSearchParams({
+        initial_balance: document.getElementById('cfg-balance').value,
+        bet_size: document.getElementById('cfg-betsize').value,
+        max_daily_exposure: document.getElementById('cfg-maxdaily').value,
+        min_edge: (parseFloat(document.getElementById('cfg-minedge').value) / 100).toString(),
+      });
+
+      const res = await fetch('/api/paper-account/config?' + params, { method: 'POST' });
+      const data = await res.json();
+      const msg = document.getElementById('save-msg');
+      msg.textContent = 'Settings saved!';
+      msg.className = 'mt-2 text-[11px] text-term-green';
+      setTimeout(() => msg.className = 'mt-2 text-[11px] hidden', 3000);
+      loadAccount();
+    });
+
+    async function resetAccount() {
+      if (!confirm('Delete ALL bets and reset balance? This cannot be undone.')) return;
+      await fetch('/api/paper-account/reset', { method: 'POST' });
+      loadAccount();
+    }
+
+    loadAccount();
+    setInterval(loadAccount, 30000);
+  </script>
+</body>
+</html>

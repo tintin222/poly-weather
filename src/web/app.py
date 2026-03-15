@@ -750,6 +750,149 @@ async def api_place_bet(
 
 
 # ---------------------------------------------------------------------------
+# Paper trading account & config
+# ---------------------------------------------------------------------------
+
+@app.get("/api/paper-account")
+async def api_paper_account():
+    """Get paper trading account summary: balance, P&L, bet history."""
+    db = get_db()
+    conn = db.conn
+
+    # Get or create paper account config
+    account = conn.execute("SELECT * FROM paper_account WHERE id = 1").fetchone()
+    if not account:
+        from config import settings
+        conn.execute(
+            """INSERT INTO paper_account (id, initial_balance, bet_size, max_daily_exposure, min_edge, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)""",
+            (settings.initial_balance, settings.bet_size, settings.max_daily_exposure, settings.min_edge, int(time.time())),
+        )
+        conn.commit()
+        account = conn.execute("SELECT * FROM paper_account WHERE id = 1").fetchone()
+
+    initial_balance = account["initial_balance"]
+
+    # Calculate current balance from bets
+    total_cost = conn.execute("SELECT COALESCE(SUM(cost), 0) as v FROM bets").fetchone()["v"]
+    total_winnings = conn.execute(
+        "SELECT COALESCE(SUM(size), 0) as v FROM bets WHERE won = 1"
+    ).fetchone()["v"]  # each winning share pays $1, so size = winnings
+    total_lost = conn.execute(
+        "SELECT COALESCE(SUM(cost), 0) as v FROM bets WHERE won = 0"
+    ).fetchone()["v"]
+    pending_cost = conn.execute(
+        "SELECT COALESCE(SUM(cost), 0) as v FROM bets WHERE won IS NULL"
+    ).fetchone()["v"]
+
+    realized_pnl = total_winnings - (total_cost - pending_cost)
+    current_balance = initial_balance - total_cost + total_winnings
+
+    # Stats
+    total_bets = conn.execute("SELECT COUNT(*) as v FROM bets").fetchone()["v"]
+    won = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won = 1").fetchone()["v"]
+    lost = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won = 0").fetchone()["v"]
+    pending = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won IS NULL").fetchone()["v"]
+
+    # Recent bets
+    recent = conn.execute("""
+        SELECT b.*, e.title as event_title, e.status as event_status
+        FROM bets b
+        LEFT JOIN polymarket_events e ON b.event_id = e.event_id
+        ORDER BY b.created_at DESC LIMIT 50
+    """).fetchall()
+
+    return {
+        "config": {
+            "initial_balance": initial_balance,
+            "bet_size": account["bet_size"],
+            "max_daily_exposure": account["max_daily_exposure"],
+            "min_edge": account["min_edge"],
+        },
+        "balance": {
+            "initial": initial_balance,
+            "current": round(current_balance, 2),
+            "total_invested": round(total_cost, 2),
+            "total_winnings": round(total_winnings, 2),
+            "realized_pnl": round(realized_pnl, 2),
+            "pending_cost": round(pending_cost, 2),
+            "pnl_pct": round((realized_pnl / initial_balance) * 100, 2) if initial_balance > 0 else 0,
+        },
+        "stats": {
+            "total_bets": total_bets,
+            "won": won,
+            "lost": lost,
+            "pending": pending,
+            "win_rate": round(won / (won + lost) * 100, 1) if (won + lost) > 0 else 0,
+        },
+        "bets": [dict(r) for r in recent],
+    }
+
+
+@app.post("/api/paper-account/config")
+async def api_update_paper_config(
+    initial_balance: float | None = None,
+    bet_size: float | None = None,
+    max_daily_exposure: float | None = None,
+    min_edge: float | None = None,
+):
+    """Update paper trading configuration."""
+    db = get_db()
+    conn = db.conn
+
+    # Ensure row exists
+    existing = conn.execute("SELECT * FROM paper_account WHERE id = 1").fetchone()
+    if not existing:
+        from config import settings
+        conn.execute(
+            """INSERT INTO paper_account (id, initial_balance, bet_size, max_daily_exposure, min_edge, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)""",
+            (settings.initial_balance, settings.bet_size, settings.max_daily_exposure, settings.min_edge, int(time.time())),
+        )
+        conn.commit()
+        existing = conn.execute("SELECT * FROM paper_account WHERE id = 1").fetchone()
+
+    updates = []
+    params = []
+    if initial_balance is not None:
+        updates.append("initial_balance = ?")
+        params.append(initial_balance)
+    if bet_size is not None:
+        updates.append("bet_size = ?")
+        params.append(bet_size)
+    if max_daily_exposure is not None:
+        updates.append("max_daily_exposure = ?")
+        params.append(max_daily_exposure)
+    if min_edge is not None:
+        updates.append("min_edge = ?")
+        params.append(min_edge)
+
+    if updates:
+        updates.append("updated_at = ?")
+        params.append(int(time.time()))
+        params.append(1)
+        conn.execute(f"UPDATE paper_account SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+
+    return {"status": "ok", "config": dict(conn.execute("SELECT * FROM paper_account WHERE id = 1").fetchone())}
+
+
+@app.post("/api/paper-account/reset")
+async def api_reset_paper_account():
+    """Reset paper trading: delete all bets, keep config."""
+    db = get_db()
+    db.conn.execute("DELETE FROM bets")
+    db.conn.commit()
+    return {"status": "ok", "message": "All bets deleted. Balance reset."}
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_page(request: Request):
+    """Config page for paper trading settings."""
+    return templates.TemplateResponse("config.html", {"request": request})
+
+
+# ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------
 

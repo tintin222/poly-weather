@@ -18,10 +18,12 @@ class Settings(BaseSettings):
 
     # Trading
     paper_mode: bool = True
-    max_bet_size: float = 50.0
-    max_daily_exposure: float = 200.0
-    min_confidence: float = 0.85
-    min_expected_value: float = 0.03
+    initial_balance: float = 1000.0     # Paper trading starting balance
+    bet_size: float = 10.0              # Fixed bet amount per trade
+    max_daily_exposure: float = 200.0   # Max total bets per day
+    min_edge: float = 0.05             # Min edge (our_prob - market_price) to bet
+    min_confidence: float = 0.85        # Legacy: min peak-passed confidence
+    min_expected_value: float = 0.03    # Legacy: min EV
 
     # Polling intervals
     weather_poll_interval_minutes: int = 30

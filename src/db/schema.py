@@ -117,4 +117,13 @@ CREATE TABLE IF NOT EXISTS bets (
 
 CREATE INDEX IF NOT EXISTS idx_bets_event ON bets(event_id);
 CREATE INDEX IF NOT EXISTS idx_bets_date ON bets(date);
+
+CREATE TABLE IF NOT EXISTS paper_account (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    initial_balance REAL NOT NULL DEFAULT 1000.0,
+    bet_size        REAL NOT NULL DEFAULT 10.0,
+    max_daily_exposure REAL NOT NULL DEFAULT 200.0,
+    min_edge        REAL NOT NULL DEFAULT 0.05,
+    updated_at      INTEGER NOT NULL
+);
 """

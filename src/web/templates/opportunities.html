@@ -43,6 +43,10 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
+      <button onclick="toggleSettled()" id="filter-settled-btn"
+        class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">
+        Show settled
+      </button>
       <button onclick="refreshMarkets()" id="refresh-btn"
         class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">
         Refresh Markets
@@ -176,6 +180,25 @@
       }
     }
 
+    // ---- Filters ----
+
+    let hideSettled = true; // default: hide 100% settled markets
+
+    function isSettled(o) {
+      // A market is "settled" if any bracket is at 100% (price >= 0.99)
+      return o.brackets.some(b => (b.yes_price || 0) >= 0.99);
+    }
+
+    function toggleSettled() {
+      hideSettled = !hideSettled;
+      const btn = document.getElementById('filter-settled-btn');
+      btn.textContent = hideSettled ? 'Show settled' : 'Hide settled';
+      btn.className = hideSettled
+        ? 'btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]'
+        : 'btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]';
+      render();
+    }
+
     // ---- Render ----
 
     function render() {
@@ -189,11 +212,21 @@
         return;
       }
 
+      // Apply filters
+      const filtered = hideSettled ? opportunities.filter(o => !isSettled(o)) : opportunities;
+      const settledCount = opportunities.filter(isSettled).length;
+
       // Group by date
-      const todayOps = opportunities.filter(o => o.is_today);
-      const futureOps = opportunities.filter(o => !o.is_today);
+      const todayOps = filtered.filter(o => o.is_today);
+      const futureOps = filtered.filter(o => !o.is_today);
 
       let html = '';
+
+      // Filter bar
+      html += `<div class="flex items-center gap-3 mb-3 text-[11px]">
+        <span class="text-term-muted">${filtered.length} of ${opportunities.length} markets</span>
+        ${settledCount > 0 ? `<span class="text-term-muted">(${settledCount} settled at 100%)</span>` : ''}
+      </div>`;
 
       if (todayOps.length) {
         html += `<div class="text-term-cyan text-[11px] font-semibold uppercase tracking-wider mb-2">Today's Markets (${todayOps.length})</div>`;
@@ -207,6 +240,13 @@
         html += `<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">`;
         futureOps.forEach(o => { html += renderCardCompact(o); });
         html += `</div>`;
+      }
+
+      if (!todayOps.length && !futureOps.length) {
+        html += `<div class="text-center py-12 text-term-muted">
+          <div class="text-lg mb-2">All ${settledCount} markets are settled at 100%</div>
+          <div class="text-[11px]">No actionable opportunities right now. Click "Show settled" to view them.</div>
+        </div>`;
       }
 
       container.innerHTML = html;

@@ -367,6 +367,13 @@ async def api_opportunities():
                 (city_key,),
             ).fetchone()["cnt"]
 
+            # Always find which bracket the current temp maps to
+            matching = evaluator.find_matching_bracket(
+                max_temp, [dict(b) for b in brackets]
+            )
+            matching_label = matching["bracket_label"] if matching else None
+            matching_price = (matching.get("current_yes_price", 0) or 0) if matching else 0
+
             if hist_peaks >= 5:
                 try:
                     predictor.train(city_key, event_date, window_days=15, years_back=1)
@@ -380,35 +387,67 @@ async def api_opportunities():
                         "hours_past_mean": round(prediction.hours_past_mean, 1),
                     }
 
-                    # Find matching bracket and evaluate
-                    matching = evaluator.find_matching_bracket(
-                        max_temp, [dict(b) for b in brackets]
-                    )
-                    if matching:
-                        yes_price = matching.get("current_yes_price", 0) or 0
-                        if yes_price > 0:
-                            decision = evaluator.evaluate(
-                                confidence=prediction.confidence,
-                                market_price=yes_price,
-                                current_max_temp=max_temp,
-                                bracket_label=matching["bracket_label"],
-                            )
-                            recommendation = {
-                                "action": decision.action,
-                                "reason": decision.reason,
-                                "bracket_label": matching["bracket_label"],
-                                "bracket_id": matching["id"],
-                                "market_price": yes_price,
-                                "expected_value": round(decision.expected_value, 4),
-                                "kelly_fraction": round(decision.kelly_fraction, 4),
-                                "token_id_yes": matching.get("clob_token_id_yes"),
-                            }
+                    # Build recommendation with clear explanation
+                    if matching and matching_price > 0:
+                        decision = evaluator.evaluate(
+                            confidence=prediction.confidence,
+                            market_price=matching_price,
+                            current_max_temp=max_temp,
+                            bracket_label=matching["bracket_label"],
+                        )
+                        recommendation = {
+                            "action": decision.action,
+                            "reason": decision.reason,
+                            "bracket_label": matching["bracket_label"],
+                            "bracket_id": matching["id"],
+                            "market_price": matching_price,
+                            "expected_value": round(decision.expected_value, 4),
+                            "kelly_fraction": round(decision.kelly_fraction, 4),
+                            "token_id_yes": matching.get("clob_token_id_yes"),
+                        }
+                    elif matching and matching_price <= 0:
+                        recommendation = {
+                            "action": "WAIT",
+                            "reason": f"Matching bracket '{matching_label}' has no market price yet (0¢). Market may not have liquidity.",
+                            "bracket_label": matching_label,
+                            "bracket_id": matching["id"] if matching else None,
+                            "market_price": 0,
+                            "expected_value": 0,
+                            "kelly_fraction": 0,
+                            "token_id_yes": matching.get("clob_token_id_yes") if matching else None,
+                        }
+                    else:
+                        # Current temp doesn't match any bracket
+                        recommendation = {
+                            "action": "WAIT",
+                            "reason": f"Current peak {max_temp}° doesn't match any bracket. Temp may still change.",
+                            "bracket_label": None,
+                            "bracket_id": None,
+                            "market_price": 0,
+                            "expected_value": 0,
+                            "kelly_fraction": 0,
+                            "token_id_yes": None,
+                        }
                 except Exception as exc:
                     log.warning("opportunity_analysis_error", city=city_key, error=str(exc))
+            else:
+                # Not enough history for model
+                recommendation = {
+                    "action": "WAIT",
+                    "reason": f"Need ≥5 days of history (have {hist_peaks}). Backfilling...",
+                    "bracket_label": matching_label,
+                    "bracket_id": matching["id"] if matching else None,
+                    "market_price": matching_price,
+                    "expected_value": 0,
+                    "kelly_fraction": 0,
+                    "token_id_yes": None,
+                }
 
             peak_info = {
                 "historical_days": hist_peaks,
                 "has_history": hist_peaks >= 5,
+                "matching_bracket": matching_label,
+                "matching_price": matching_price,
             }
 
         slug = event["slug"]

@@ -295,6 +295,9 @@
         }
       }
 
+      // Determine matching bracket from peak_info or recommendation
+      const matchLabel = o.peak_info?.matching_bracket || (r && r.bracket_label);
+
       // Brackets
       let bracketsHTML = '';
       if (o.brackets.length) {
@@ -303,7 +306,7 @@
         o.brackets.forEach(b => {
           const pct = ((b.yes_price || 0) * 100).toFixed(0);
           const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
-          const isMatch = r && r.bracket_label === b.label;
+          const isMatch = matchLabel && matchLabel === b.label;
           const highlight = isMatch ? 'bg-term-cyan/20 border-l-2 border-term-cyan pl-2' : '';
           bracketsHTML += `
             <div class="flex items-center gap-2 text-[11px] ${highlight} py-0.5 rounded-sm">
@@ -312,32 +315,53 @@
                 <div class="h-full rounded-sm ${isMatch ? 'bg-term-cyan/50' : 'bg-term-muted/30'}" style="width:${barW}%"></div>
               </div>
               <span class="w-10 text-right ${isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
-              ${isMatch ? '<span class="text-[9px] text-term-cyan">MATCH</span>' : ''}
+              ${isMatch ? `<span class="text-[9px] text-term-cyan">${w ? w.max_temp + unit : ''} ← PEAK</span>` : ''}
             </div>`;
         });
         bracketsHTML += `</div>`;
       }
 
-      // Recommendation
+      // Recommendation - always show something
       let recoHTML = '';
       if (r) {
-        const evPct = (r.expected_value * 100).toFixed(1);
         const isGood = r.action === 'BUY' || r.action === 'STRONG_BUY';
-        const actionColor = isGood ? 'bg-term-green/10 text-term-green border-term-green/20' : 'bg-term-surface text-term-muted border-term-border';
+        const isWait = r.action === 'WAIT';
+        const actionColor = isGood
+          ? 'bg-term-green/10 text-term-green border-term-green/20'
+          : isWait
+            ? 'bg-term-amber/10 text-term-amber border-term-amber/20'
+            : 'bg-term-surface text-term-muted border-term-border';
+        const actionIcon = isGood ? '→' : isWait ? '⏳' : '✗';
+
+        let detailLine = '';
+        if (r.bracket_label && r.market_price > 0) {
+          const evPct = (r.expected_value * 100).toFixed(1);
+          detailLine = `<span class="text-[11px] ml-2">${r.bracket_label} @ ${(r.market_price * 100).toFixed(0)}¢</span>
+            <span class="text-[11px] ml-2 ${r.expected_value > 0 ? 'text-term-green' : r.expected_value < 0 ? 'text-term-red' : 'text-term-muted'}">EV: ${evPct}%</span>`;
+        }
+
         recoHTML = `
-          <div class="flex items-center justify-between p-2 rounded border ${actionColor}">
-            <div>
-              <span class="font-bold text-sm">${r.action}</span>
-              <span class="text-[11px] ml-2">${r.bracket_label} @ ${(r.market_price * 100).toFixed(0)}¢</span>
-              <span class="text-[11px] ml-2 ${r.expected_value >= 0 ? 'text-term-green' : 'text-term-red'}">EV: ${evPct}%</span>
+          <div class="p-2 rounded border ${actionColor}">
+            <div class="flex items-center justify-between">
+              <div>
+                <span class="font-bold text-sm">${actionIcon} ${r.action}</span>
+                ${detailLine}
+              </div>
+              ${isGood ? `<button onclick='placeBet(${JSON.stringify({
+                event_id: o.event_id, bracket_id: r.bracket_id, token_id: r.token_id_yes,
+                price: r.market_price, size: 10, city_key: o.city_key, date: o.date,
+                bracket_label: r.bracket_label, current_max_temp: w?.max_temp || 0,
+                peak_hour: w?.peak_hour || 0, model_confidence: c?.confidence || 0,
+                expected_value: r.expected_value
+              })})' class="btn px-3 py-1 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[11px] font-medium">Paper Bet</button>` : ''}
             </div>
-            ${isGood ? `<button onclick='placeBet(${JSON.stringify({
-              event_id: o.event_id, bracket_id: r.bracket_id, token_id: r.token_id_yes,
-              price: r.market_price, size: 10, city_key: o.city_key, date: o.date,
-              bracket_label: r.bracket_label, current_max_temp: w?.max_temp || 0,
-              peak_hour: w?.peak_hour || 0, model_confidence: c?.confidence || 0,
-              expected_value: r.expected_value
-            })})' class="btn px-3 py-1 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[11px] font-medium">Paper Bet</button>` : ''}
+            <div class="text-[10px] mt-1 opacity-75">${r.reason}</div>
+          </div>`;
+      } else if (w && !c) {
+        recoHTML = `
+          <div class="p-2 rounded border bg-term-amber/10 text-term-amber border-term-amber/20">
+            <span class="font-bold text-sm">⏳ WAIT</span>
+            <div class="text-[10px] mt-1 opacity-75">Need historical data for confidence model. Backfill in progress...</div>
           </div>`;
       }
 

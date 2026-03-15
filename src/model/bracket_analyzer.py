@@ -180,10 +180,13 @@ def compute_bracket_probabilities(
 
         edge = our_prob - market_price
 
-        if edge > 0.05 and our_prob >= 0.05:
+        # BUY only if there's real market liquidity (price >= 1¢)
+        if market_price >= 0.01 and edge > 0.05 and our_prob >= 0.05:
             verdict = "BUY"
-        elif market_price > 0 and edge < -0.10:
+        elif market_price >= 0.01 and edge < -0.10:
             verdict = "AVOID"
+        elif market_price < 0.01 and our_prob >= 0.10:
+            verdict = "CHEAP"  # our model says likely but no/thin market
         else:
             verdict = "NEUTRAL"
 
@@ -196,9 +199,8 @@ def compute_bracket_probabilities(
             verdict=verdict,
         ))
 
-    # Mark best bet: highest positive edge where our probability is meaningful
-    # Allow 0¢ market price (can place limit order at 1¢)
-    buyable = [b for b in results if b.edge > 0.03 and b.our_probability >= 0.05]
+    # Best bet: must have real market liquidity (>= 1¢) to actually buy
+    buyable = [b for b in results if b.verdict == "BUY" and b.market_probability >= 0.01]
     if buyable:
         best = max(buyable, key=lambda b: b.edge)
         best.is_best_bet = True

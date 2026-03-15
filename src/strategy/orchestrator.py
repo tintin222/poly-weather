@@ -224,31 +224,45 @@ class Orchestrator:
                      price=yes_price, size=position.size, cost=position.cost,
                      order_id=order_result.order_id, paper=order_result.is_paper)
 
+    @staticmethod
+    def _is_wu_scrape_time() -> bool:
+        """Check if current minute is :05 or :35 (5 min after WU updates at :00/:30)."""
+        import datetime
+        minute = datetime.datetime.now().minute
+        return minute in (5, 35)
+
     async def run_loop(
         self,
-        weather_interval_minutes: int = 30,
         market_interval_minutes: int = 5,
     ) -> None:
-        """Run the orchestrator in a continuous loop."""
+        """Run the orchestrator in a continuous loop.
+
+        Market prices polled every 5 minutes.
+        Weather scraped at :05 and :35 each hour (5 min after WU updates).
+        """
         log.info("orchestrator_started",
-                 weather_interval=weather_interval_minutes,
                  market_interval=market_interval_minutes,
+                 weather_schedule="every :05 and :35",
                  paper_mode=self._settings.paper_mode)
 
-        last_weather_scrape = 0
         last_market_poll = 0
+        last_weather_minute = -1  # track which :05/:35 we last scraped
 
         while True:
             try:
                 now = time.time()
+                import datetime
+                current_minute = datetime.datetime.now().minute
 
-                # Market poll (more frequent)
+                # Market poll every 5 minutes
                 if now - last_market_poll >= market_interval_minutes * 60:
                     await self._market_monitor.poll_all()
                     last_market_poll = now
 
-                # Weather scrape + evaluation (less frequent)
-                if now - last_weather_scrape >= weather_interval_minutes * 60:
+                # Weather scrape at :05 and :35 (once per slot)
+                if self._is_wu_scrape_time() and current_minute != last_weather_minute:
+                    last_weather_minute = current_minute
+                    log.info("wu_scrape_triggered", minute=current_minute)
                     cities_today = self._get_todays_cities()
                     if cities_today:
                         scraper = WUScraper(headless=True)
@@ -261,9 +275,8 @@ class Orchestrator:
                                     log.error("evaluation_error", city=city.key, error=str(exc))
                         finally:
                             await scraper.stop()
-                    last_weather_scrape = now
 
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)  # check every 30s to not miss the minute window
 
             except KeyboardInterrupt:
                 log.info("orchestrator_stopped")

@@ -29,7 +29,6 @@ def run_bot_loop():
     try:
         loop.run_until_complete(
             orchestrator.run_loop(
-                weather_interval_minutes=settings.weather_poll_interval_minutes,
                 market_interval_minutes=settings.market_poll_interval_minutes,
             )
         )

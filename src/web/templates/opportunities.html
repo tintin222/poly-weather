@@ -163,8 +163,17 @@
       setTimeout(poll, 2000);
     }
 
+    async function placeBetWithAmount(inputId, params) {
+      const amt = parseFloat(document.getElementById(inputId).value) || 10;
+      const size = Math.round(amt / params.price * 100) / 100;
+      params.size = size;
+      return placeBet(params);
+    }
+
     async function placeBet(params) {
-      if (!confirm(`Place paper bet: ${params.bracket_label} @ $${params.price.toFixed(2)} x ${params.size} shares ($${(params.price * params.size).toFixed(2)})?`)) return;
+      if (!params.size) params.size = 10;
+      const cost = (params.price * params.size).toFixed(2);
+      if (!confirm(`Place paper bet: ${params.bracket_label} @ ${(params.price*100).toFixed(0)}¢ — $${cost} to win $${params.size.toFixed(2)}?`)) return;
       showStatus('Placing paper bet...');
       try {
         const qs = new URLSearchParams(params).toString();
@@ -270,6 +279,7 @@
           const ourPct = (bb.our_probability * 100).toFixed(0);
           const mktPct = (bb.market_probability * 100).toFixed(0);
           const edgePct = (bb.edge * 100).toFixed(0);
+          const betId = `bet-${o.city_key}-${bb.label}`.replace(/[^a-zA-Z0-9-]/g, '');
           bestBetHTML = `
             <div class="p-3 rounded border-2 border-term-green/40 bg-term-green/5 mb-3">
               <div class="flex items-center justify-between mb-1">
@@ -277,13 +287,19 @@
                   <span class="text-term-green font-bold text-lg font-display">BUY ${bb.label}</span>
                   <span class="text-term-green/70 text-[11px] ml-2">+${edgePct}% edge</span>
                 </div>
-                <button onclick='placeBet(${JSON.stringify({
-                  event_id: o.event_id, bracket_id: 0, token_id: "",
-                  price: bb.market_probability, size: 10, city_key: o.city_key, date: o.date,
-                  bracket_label: bb.label, current_max_temp: w?.max_temp || 0,
-                  peak_hour: w?.peak_hour || 0, model_confidence: bb.our_probability,
-                  expected_value: bb.edge
-                })})' class="btn px-4 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">Paper Bet ${mktPct}¢</button>
+                <div class="flex items-center gap-2">
+                  <span class="text-term-muted text-[11px]">$</span>
+                  <input type="number" id="${betId}-amt" value="10" min="1" step="1"
+                    class="w-16 px-2 py-1 rounded bg-term-bg border border-term-green/30 text-term-bright text-[12px] text-right"
+                    style="font-family: inherit;">
+                  <button onclick='placeBetWithAmount("${betId}-amt", ${JSON.stringify({
+                    event_id: o.event_id, bracket_id: 0, token_id: "",
+                    price: bb.market_probability, city_key: o.city_key, date: o.date,
+                    bracket_label: bb.label, current_max_temp: w?.max_temp || 0,
+                    peak_hour: w?.peak_hour || 0, model_confidence: bb.our_probability,
+                    expected_value: bb.edge
+                  })})' class="btn px-4 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">Paper Bet ${mktPct}¢</button>
+                </div>
               </div>
               <div class="text-[11px] text-term-green/80">
                 Our model: ${ourPct}% likely | Market price: ${mktPct}¢ | Potential profit: +${edgePct}% per dollar

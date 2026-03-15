@@ -43,10 +43,13 @@ def run_bot_loop():
 def main():
     setup_logging(settings.log_level)
 
-    # Start the bot loop in a daemon thread
-    bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
-    bot_thread.start()
-    log.info("bot_thread_started")
+    # Optionally start the automated bot loop in a daemon thread
+    if settings.bot_auto_start:
+        bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
+        bot_thread.start()
+        log.info("bot_thread_started")
+    else:
+        log.info("bot_auto_start_disabled", msg="Dashboard-only mode. Use /opportunities for manual trading.")
 
     # Run the FastAPI dashboard on the main thread
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000

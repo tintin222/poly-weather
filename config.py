@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Active cities
     active_cities: list[str] = ["Ankara"]
 
+    # Bot mode
+    bot_auto_start: bool = False  # If True, runs automated bot loop in background
+
     # Logging
     log_level: str = "INFO"
 

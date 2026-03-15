@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -10,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from src.db.database import Database
+from src.db.repositories import MarketRepository, WeatherRepository
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -21,6 +24,9 @@ app = FastAPI(title="poly-weather", docs_url="/api/docs")
 
 # Database singleton - initialized on startup
 _db: Database | None = None
+
+# In-memory job tracking for async scrape/backfill tasks
+_jobs: dict[str, dict] = {}
 
 
 def get_db() -> Database:
@@ -197,6 +203,371 @@ async def api_peaks(city_key: str, limit: int = 30):
     ).fetchall()
     return [dict(r) for r in rows]
 
+
+# ---------------------------------------------------------------------------
+# Opportunities page
+# ---------------------------------------------------------------------------
+
+@app.get("/opportunities", response_class=HTMLResponse)
+async def opportunities_page(request: Request):
+    return templates.TemplateResponse("opportunities.html", {"request": request})
+
+
+@app.get("/api/opportunities")
+async def api_opportunities():
+    """Build enriched opportunity data for each active temperature event today."""
+    from config import settings
+    from src.model.features import compute_current_max
+    from src.model.peak_predictor import PeakPredictor
+    from src.polymarket.gamma_api import parse_brackets, parse_city_and_date
+    from src.strategy.evaluator import EVEvaluator
+    from src.utils.time_utils import current_hour_in_tz, today_in_tz
+    from src.weather.cities import get_city
+
+    db = get_db()
+    weather_repo = WeatherRepository(db)
+    market_repo = MarketRepository(db)
+    evaluator = EVEvaluator(
+        min_confidence=settings.min_confidence,
+        min_expected_value=settings.min_expected_value,
+    )
+    predictor = PeakPredictor(db)
+
+    # Get all active events
+    active_events = market_repo.get_active_events()
+    opportunities = []
+
+    for event in active_events:
+        city_key = event["city_key"]
+        event_date = event["date"]
+        city = get_city(city_key)
+        if not city:
+            continue
+
+        today = today_in_tz(city.timezone)
+        current_hour = current_hour_in_tz(city.timezone)
+        is_today = event_date == today
+
+        # Get brackets
+        brackets = market_repo.get_brackets_for_event(event["event_id"])
+        bracket_list = []
+        for b in brackets:
+            bracket_list.append({
+                "id": b["id"],
+                "label": b["bracket_label"],
+                "yes_price": b["current_yes_price"] or 0,
+                "no_price": b["current_no_price"] or 0,
+                "token_id_yes": b["clob_token_id_yes"],
+                "market_id": b["market_id"],
+                "condition_id": b["condition_id"],
+            })
+
+        # Get today's weather observations
+        observations = weather_repo.get_hourly_observations(city_key, event_date)
+        weather_data = None
+        peak_info = None
+        confidence_info = None
+        recommendation = None
+
+        if observations:
+            max_temp, peak_hour = compute_current_max(observations)
+            weather_data = {
+                "observation_count": len(observations),
+                "max_temp": max_temp,
+                "peak_hour": peak_hour,
+                "latest_hour": observations[-1]["hour"],
+                "latest_temp": observations[-1]["temperature"],
+            }
+
+            # Get historical peaks count
+            hist_peaks = db.conn.execute(
+                "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+                (city_key,),
+            ).fetchone()["cnt"]
+
+            if hist_peaks >= 5:
+                try:
+                    predictor.train(city_key, event_date, window_days=15, years_back=1)
+                    prediction = predictor.predict_confidence(
+                        city_key, current_hour, max_temp, observations
+                    )
+                    confidence_info = {
+                        "confidence": round(prediction.confidence, 4),
+                        "base_confidence": round(prediction.base_confidence, 4),
+                        "mean_peak_hour": round(prediction.mean_peak_hour, 1),
+                        "hours_past_mean": round(prediction.hours_past_mean, 1),
+                    }
+
+                    # Find matching bracket and evaluate
+                    matching = evaluator.find_matching_bracket(
+                        max_temp, [dict(b) for b in brackets]
+                    )
+                    if matching:
+                        yes_price = matching.get("current_yes_price", 0) or 0
+                        if yes_price > 0:
+                            decision = evaluator.evaluate(
+                                confidence=prediction.confidence,
+                                market_price=yes_price,
+                                current_max_temp=max_temp,
+                                bracket_label=matching["bracket_label"],
+                            )
+                            recommendation = {
+                                "action": decision.action,
+                                "reason": decision.reason,
+                                "bracket_label": matching["bracket_label"],
+                                "bracket_id": matching["id"],
+                                "market_price": yes_price,
+                                "expected_value": round(decision.expected_value, 4),
+                                "kelly_fraction": round(decision.kelly_fraction, 4),
+                                "token_id_yes": matching.get("clob_token_id_yes"),
+                            }
+                except Exception as exc:
+                    log.warning("opportunity_analysis_error", city=city_key, error=str(exc))
+
+            peak_info = {
+                "historical_days": hist_peaks,
+                "has_history": hist_peaks >= 5,
+            }
+
+        opportunities.append({
+            "event_id": event["event_id"],
+            "city_key": city_key,
+            "city_name": city.display_name if city else city_key,
+            "date": event_date,
+            "title": event["title"],
+            "is_today": is_today,
+            "current_hour": current_hour if is_today else None,
+            "timezone": city.timezone if city else None,
+            "unit": city.unit if city else "celsius",
+            "brackets": bracket_list,
+            "weather": weather_data,
+            "peak_info": peak_info,
+            "confidence": confidence_info,
+            "recommendation": recommendation,
+        })
+
+    # Sort: today's events first, then by city
+    opportunities.sort(key=lambda o: (not o["is_today"], o["date"], o["city_key"]))
+    return opportunities
+
+
+# ---------------------------------------------------------------------------
+# Scrape / backfill / refresh actions
+# ---------------------------------------------------------------------------
+
+@app.post("/api/refresh-markets")
+async def api_refresh_markets():
+    """Re-poll Polymarket for latest events and prices."""
+    db = get_db()
+    market_repo = MarketRepository(db)
+
+    from src.polymarket.market_monitor import MarketMonitor
+    monitor = MarketMonitor(market_repo)
+    count = await monitor.poll_all()
+    return {"status": "ok", "events_processed": count}
+
+
+@app.post("/api/scrape/{city_key}")
+async def api_scrape(city_key: str, date: str | None = None):
+    """Trigger a WU scrape for a city. Returns a job_id to poll."""
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    job_id = str(uuid.uuid4())[:8]
+    _jobs[job_id] = {"status": "running", "type": "scrape", "city": city_key, "started": time.time()}
+
+    asyncio.create_task(_run_scrape_job(job_id, city, date))
+    return {"job_id": job_id, "status": "running"}
+
+
+async def _run_scrape_job(job_id: str, city, date: str | None):
+    """Background task: scrape WU and store results."""
+    from src.utils.time_utils import today_in_tz
+    from src.weather.scraper import WUScraper
+
+    db = get_db()
+    repo = WeatherRepository(db)
+    scrape_date = date or today_in_tz(city.timezone)
+
+    try:
+        scraper = WUScraper(headless=True)
+        await scraper.start()
+        try:
+            observations = await scraper.scrape_daily(city, scrape_date)
+        finally:
+            await scraper.stop()
+
+        if observations:
+            obs_dicts = [obs.to_dict() for obs in observations]
+            count = repo.upsert_hourly_observations_batch(city.key, scrape_date, obs_dicts)
+
+            peak_obs = max(observations, key=lambda o: o.temperature)
+            repo.upsert_daily_peak(
+                city_key=city.key, date=scrape_date,
+                peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
+                observation_count=len(observations),
+            )
+            _jobs[job_id] = {
+                "status": "complete", "type": "scrape", "city": city.key,
+                "date": scrape_date, "observations": count,
+                "peak_temp": peak_obs.temperature, "peak_hour": peak_obs.hour,
+            }
+        else:
+            _jobs[job_id] = {"status": "complete", "type": "scrape", "city": city.key, "observations": 0}
+
+    except Exception as exc:
+        log.error("scrape_job_failed", job_id=job_id, error=str(exc))
+        _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
+
+
+@app.post("/api/backfill/{city_key}")
+async def api_backfill(city_key: str, days: int = 30):
+    """Trigger a historical backfill for a city. Returns a job_id to poll."""
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    job_id = str(uuid.uuid4())[:8]
+    _jobs[job_id] = {
+        "status": "running", "type": "backfill", "city": city_key,
+        "days": days, "started": time.time(),
+    }
+
+    asyncio.create_task(_run_backfill_job(job_id, city, days))
+    return {"job_id": job_id, "status": "running", "days": days}
+
+
+async def _run_backfill_job(job_id: str, city, days: int):
+    """Background task: backfill historical data."""
+    from src.weather.historical_loader import HistoricalLoader
+    from src.weather.scraper import WUScraper
+
+    db = get_db()
+    repo = WeatherRepository(db)
+
+    try:
+        scraper = WUScraper(headless=True)
+        await scraper.start()
+        try:
+            loader = HistoricalLoader(scraper, repo)
+            await loader.backfill(city, days=days)
+        finally:
+            await scraper.stop()
+
+        total = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city.key,),
+        ).fetchone()["cnt"]
+
+        _jobs[job_id] = {
+            "status": "complete", "type": "backfill", "city": city.key,
+            "days": days, "total_peaks": total,
+        }
+    except Exception as exc:
+        log.error("backfill_job_failed", job_id=job_id, error=str(exc))
+        _jobs[job_id] = {"status": "error", "type": "backfill", "error": str(exc)}
+
+
+@app.get("/api/job/{job_id}")
+async def api_job_status(job_id: str):
+    """Check status of a scrape/backfill job."""
+    if job_id not in _jobs:
+        return {"error": "Unknown job", "job_id": job_id}
+    return {"job_id": job_id, **_jobs[job_id]}
+
+
+@app.get("/api/city/{city_key}/analysis")
+async def api_city_analysis(city_key: str):
+    """Return peak hour distribution and CDF for a city."""
+    from src.model.peak_predictor import PeakPredictor
+    from src.utils.time_utils import today_in_tz
+    from src.weather.cities import get_city
+
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    db = get_db()
+    today = today_in_tz(city.timezone)
+
+    predictor = PeakPredictor(db)
+    try:
+        dist = predictor.train(city_key, today, window_days=15, years_back=1)
+    except Exception:
+        return {"city_key": city_key, "has_model": False, "cdf": []}
+
+    cdf_table = [{"hour": h, "probability": round(dist.cdf(h), 4)} for h in range(24)]
+
+    # Recent peaks
+    peaks = db.conn.execute(
+        "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
+        (city_key,),
+    ).fetchall()
+
+    return {
+        "city_key": city_key,
+        "has_model": True,
+        "mean_peak_hour": round(dist.mean_peak_hour, 1),
+        "std_peak_hour": round(dist.std_peak_hour, 1),
+        "percentile_range": dist.percentile_range(10, 90),
+        "cdf": cdf_table,
+        "recent_peaks": [dict(p) for p in peaks],
+    }
+
+
+@app.post("/api/place-bet")
+async def api_place_bet(
+    event_id: str,
+    bracket_id: int,
+    token_id: str,
+    price: float,
+    size: float,
+    city_key: str,
+    date: str,
+    bracket_label: str,
+    current_max_temp: float,
+    peak_hour: int,
+    model_confidence: float,
+    expected_value: float,
+):
+    """Manually place a paper bet from the opportunities page."""
+    from config import settings
+    from src.polymarket.trader import PolymarketTrader
+
+    db = get_db()
+    market_repo = MarketRepository(db)
+    trader = PolymarketTrader(settings)
+
+    result = trader.place_limit_buy(
+        token_id=token_id, price=price, size=size,
+    )
+
+    bet_id = market_repo.record_bet(
+        event_id=event_id, bracket_id=bracket_id, city_key=city_key,
+        date=date, bracket_label=bracket_label, side="BUY",
+        token_id=token_id, price=price, size=size,
+        cost=round(price * size, 2),
+        current_max_temp=current_max_temp, peak_hour=peak_hour,
+        model_confidence=model_confidence, expected_value=expected_value,
+        order_id=result.order_id, order_status=result.status,
+        is_paper=result.is_paper,
+    )
+
+    return {
+        "bet_id": bet_id,
+        "order_id": result.order_id,
+        "status": result.status,
+        "success": result.success,
+        "is_paper": result.is_paper,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
 
 @app.on_event("shutdown")
 async def shutdown():

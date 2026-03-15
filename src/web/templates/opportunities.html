@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // opportunities</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: {
+            term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; }
+    .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(0,200,255,0.15), transparent); }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } } .spinner { animation: spin 1s linear infinite; }
+    .btn { transition: all 0.15s; } .btn:hover { filter: brightness(1.2); } .btn:active { transform: scale(0.97); }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <!-- Header -->
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-cyan">Opportunities</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-3">
+      <button onclick="refreshMarkets()" id="refresh-btn"
+        class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">
+        Refresh Markets
+      </button>
+      <button onclick="loadOpportunities()" class="btn px-3 py-1.5 rounded bg-term-surface text-term-text border border-term-border text-[11px]">
+        Reload
+      </button>
+    </div>
+  </header>
+
+  <!-- Status bar -->
+  <div id="status-bar" class="px-4 py-1.5 text-[10px] text-term-muted border-b border-term-border hidden">
+    <span id="status-msg"></span>
+  </div>
+
+  <!-- Main content -->
+  <main class="p-4 max-w-[1400px] mx-auto">
+    <div id="opportunities-container" class="space-y-4">
+      <div class="text-center py-16 text-term-muted">
+        <div class="text-lg mb-2">Loading opportunities...</div>
+        <div class="text-[11px]">Fetching active Polymarket temperature markets</div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    let opportunities = [];
+
+    // ---- API calls ----
+
+    async function loadOpportunities() {
+      showStatus('Loading opportunities...');
+      try {
+        const res = await fetch('/api/opportunities');
+        opportunities = await res.json();
+        render();
+        showStatus(`Loaded ${opportunities.length} opportunities`, 2000);
+      } catch (e) {
+        showStatus('Error loading opportunities: ' + e.message);
+      }
+    }
+
+    async function refreshMarkets() {
+      const btn = document.getElementById('refresh-btn');
+      btn.textContent = 'Refreshing...';
+      btn.disabled = true;
+      showStatus('Polling Polymarket for latest events and prices...');
+      try {
+        await fetch('/api/refresh-markets', { method: 'POST' });
+        showStatus('Markets refreshed. Reloading opportunities...');
+        await loadOpportunities();
+      } catch (e) {
+        showStatus('Error: ' + e.message);
+      } finally {
+        btn.textContent = 'Refresh Markets';
+        btn.disabled = false;
+      }
+    }
+
+    async function triggerScrape(cityKey) {
+      const card = document.getElementById('card-' + cityKey);
+      const btn = card?.querySelector('.scrape-btn');
+      if (btn) { btn.textContent = 'Scraping...'; btn.disabled = true; }
+      showStatus(`Scraping Weather Underground for ${cityKey}...`);
+      try {
+        const res = await fetch(`/api/scrape/${encodeURIComponent(cityKey)}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.job_id) {
+          pollJob(data.job_id, cityKey, 'scrape');
+        }
+      } catch (e) {
+        showStatus('Scrape error: ' + e.message);
+        if (btn) { btn.textContent = 'Scrape Now'; btn.disabled = false; }
+      }
+    }
+
+    async function triggerBackfill(cityKey, days = 30) {
+      showStatus(`Starting ${days}-day backfill for ${cityKey}... This may take several minutes.`);
+      try {
+        const res = await fetch(`/api/backfill/${encodeURIComponent(cityKey)}?days=${days}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.job_id) {
+          pollJob(data.job_id, cityKey, 'backfill');
+        }
+      } catch (e) {
+        showStatus('Backfill error: ' + e.message);
+      }
+    }
+
+    async function pollJob(jobId, cityKey, type) {
+      const poll = async () => {
+        try {
+          const res = await fetch(`/api/job/${jobId}`);
+          const data = await res.json();
+          if (data.status === 'running') {
+            const elapsed = Math.round((Date.now() / 1000) - data.started);
+            showStatus(`${type === 'backfill' ? 'Backfilling' : 'Scraping'} ${cityKey}... (${elapsed}s)`);
+            setTimeout(poll, 2000);
+          } else if (data.status === 'complete') {
+            if (type === 'scrape') {
+              showStatus(`Scraped ${data.observations} observations for ${cityKey}. Peak: ${data.peak_temp}° at ${data.peak_hour}:00`);
+            } else {
+              showStatus(`Backfill complete for ${cityKey}. ${data.total_peaks} total days of data.`);
+            }
+            await loadOpportunities();
+          } else {
+            showStatus(`${type} error: ${data.error || 'Unknown error'}`);
+          }
+        } catch (e) {
+          showStatus('Poll error: ' + e.message);
+        }
+      };
+      setTimeout(poll, 2000);
+    }
+
+    async function placeBet(params) {
+      if (!confirm(`Place paper bet: ${params.bracket_label} @ $${params.price.toFixed(2)} x ${params.size} shares ($${(params.price * params.size).toFixed(2)})?`)) return;
+      showStatus('Placing paper bet...');
+      try {
+        const qs = new URLSearchParams(params).toString();
+        const res = await fetch('/api/place-bet?' + qs, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showStatus(`Paper bet placed! Order: ${data.order_id}`);
+          await loadOpportunities();
+        } else {
+          showStatus('Bet failed: ' + (data.error_msg || 'Unknown'));
+        }
+      } catch (e) {
+        showStatus('Bet error: ' + e.message);
+      }
+    }
+
+    // ---- Render ----
+
+    function render() {
+      const container = document.getElementById('opportunities-container');
+      if (!opportunities.length) {
+        container.innerHTML = `
+          <div class="text-center py-16 text-term-muted">
+            <div class="text-lg mb-2">No opportunities found</div>
+            <div class="text-[11px]">Click "Refresh Markets" to fetch active Polymarket temperature events.</div>
+          </div>`;
+        return;
+      }
+
+      // Group by date
+      const todayOps = opportunities.filter(o => o.is_today);
+      const futureOps = opportunities.filter(o => !o.is_today);
+
+      let html = '';
+
+      if (todayOps.length) {
+        html += `<div class="text-term-cyan text-[11px] font-semibold uppercase tracking-wider mb-2">Today's Markets (${todayOps.length})</div>`;
+        html += `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">`;
+        todayOps.forEach(o => { html += renderCard(o); });
+        html += `</div>`;
+      }
+
+      if (futureOps.length) {
+        html += `<div class="text-term-muted text-[11px] font-semibold uppercase tracking-wider mb-2 mt-6">Future Markets (${futureOps.length})</div>`;
+        html += `<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">`;
+        futureOps.forEach(o => { html += renderCardCompact(o); });
+        html += `</div>`;
+      }
+
+      container.innerHTML = html;
+    }
+
+    function renderCard(o) {
+      const unit = o.unit === 'fahrenheit' ? '°F' : '°C';
+      const w = o.weather;
+      const c = o.confidence;
+      const r = o.recommendation;
+
+      let weatherSection = '';
+      if (w) {
+        weatherSection = `
+          <div class="flex items-baseline gap-3 mb-2">
+            <span class="text-2xl font-display font-bold text-term-amber">${w.max_temp}${unit}</span>
+            <span class="text-term-muted">peak at ${w.peak_hour}:00</span>
+            <span class="text-term-muted">(${w.observation_count} readings)</span>
+          </div>`;
+      } else {
+        weatherSection = `
+          <div class="text-term-muted mb-2">No weather data scraped yet</div>`;
+      }
+
+      let confidenceSection = '';
+      if (c) {
+        const confPct = (c.confidence * 100).toFixed(0);
+        const confColor = c.confidence >= 0.85 ? 'text-term-green' : c.confidence >= 0.5 ? 'text-term-amber' : 'text-term-red';
+        confidenceSection = `
+          <div class="flex items-center gap-4 mb-2 text-[11px]">
+            <div>
+              <span class="text-term-muted">Confidence:</span>
+              <span class="${confColor} font-bold text-sm">${confPct}%</span>
+            </div>
+            <div class="text-term-muted">Peak hour avg: ${c.mean_peak_hour}:00</div>
+            <div class="text-term-muted">${c.hours_past_mean > 0 ? '+' : ''}${c.hours_past_mean.toFixed(1)}h past mean</div>
+          </div>`;
+      }
+
+      let historyBadge = '';
+      if (o.peak_info) {
+        if (o.peak_info.has_history) {
+          historyBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">${o.peak_info.historical_days}d history</span>`;
+        } else {
+          historyBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">${o.peak_info.historical_days}d data</span>`;
+        }
+      }
+
+      // Brackets
+      let bracketsHTML = '';
+      if (o.brackets.length) {
+        const maxPrice = Math.max(...o.brackets.map(b => b.yes_price || 0), 0.01);
+        bracketsHTML = `<div class="space-y-1 mb-3">`;
+        o.brackets.forEach(b => {
+          const pct = ((b.yes_price || 0) * 100).toFixed(0);
+          const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
+          const isMatch = r && r.bracket_label === b.label;
+          const highlight = isMatch ? 'bg-term-cyan/20 border-l-2 border-term-cyan pl-2' : '';
+          bracketsHTML += `
+            <div class="flex items-center gap-2 text-[11px] ${highlight} py-0.5 rounded-sm">
+              <span class="w-28 text-term-bright">${b.label}</span>
+              <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden">
+                <div class="h-full rounded-sm ${isMatch ? 'bg-term-cyan/50' : 'bg-term-muted/30'}" style="width:${barW}%"></div>
+              </div>
+              <span class="w-10 text-right ${isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
+              ${isMatch ? '<span class="text-[9px] text-term-cyan">MATCH</span>' : ''}
+            </div>`;
+        });
+        bracketsHTML += `</div>`;
+      }
+
+      // Recommendation
+      let recoHTML = '';
+      if (r) {
+        const evPct = (r.expected_value * 100).toFixed(1);
+        const isGood = r.action === 'BUY' || r.action === 'STRONG_BUY';
+        const actionColor = isGood ? 'bg-term-green/10 text-term-green border-term-green/20' : 'bg-term-surface text-term-muted border-term-border';
+        recoHTML = `
+          <div class="flex items-center justify-between p-2 rounded border ${actionColor}">
+            <div>
+              <span class="font-bold text-sm">${r.action}</span>
+              <span class="text-[11px] ml-2">${r.bracket_label} @ ${(r.market_price * 100).toFixed(0)}¢</span>
+              <span class="text-[11px] ml-2 ${r.expected_value >= 0 ? 'text-term-green' : 'text-term-red'}">EV: ${evPct}%</span>
+            </div>
+            ${isGood ? `<button onclick='placeBet(${JSON.stringify({
+              event_id: o.event_id, bracket_id: r.bracket_id, token_id: r.token_id_yes,
+              price: r.market_price, size: 10, city_key: o.city_key, date: o.date,
+              bracket_label: r.bracket_label, current_max_temp: w?.max_temp || 0,
+              peak_hour: w?.peak_hour || 0, model_confidence: c?.confidence || 0,
+              expected_value: r.expected_value
+            })})' class="btn px-3 py-1 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[11px] font-medium">Paper Bet</button>` : ''}
+          </div>`;
+      }
+
+      // Action buttons
+      let actions = `
+        <div class="flex gap-2 mt-3">
+          <button onclick="triggerScrape('${o.city_key}')" class="scrape-btn btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px]">
+            ${w ? 'Re-scrape' : 'Scrape Now'}
+          </button>
+          ${!o.peak_info?.has_history ? `<button onclick="triggerBackfill('${o.city_key}', 30)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 30d</button>` : ''}
+        </div>`;
+
+      return `
+        <div id="card-${o.city_key}" class="card rounded-md relative overflow-hidden">
+          <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <h3 class="font-display font-semibold text-term-bright text-sm">${o.city_name}</h3>
+              <span class="text-term-muted text-[11px]">${o.date}</span>
+              ${historyBadge}
+            </div>
+            ${o.current_hour !== null ? `<span class="text-term-muted text-[11px]">${o.current_hour}:00 local</span>` : ''}
+          </div>
+          <div class="p-4">
+            ${weatherSection}
+            ${confidenceSection}
+            ${bracketsHTML}
+            ${recoHTML}
+            ${actions}
+          </div>
+        </div>`;
+    }
+
+    function renderCardCompact(o) {
+      const topBracket = o.brackets.reduce((a, b) => (b.yes_price || 0) > (a.yes_price || 0) ? b : a, o.brackets[0] || {});
+      return `
+        <div class="card rounded-md relative p-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-display font-semibold text-term-bright text-[12px]">${o.city_name}</span>
+            <span class="text-term-muted text-[10px]">${o.date}</span>
+          </div>
+          <div class="text-[11px] text-term-muted">
+            ${topBracket.label ? `Leading: <span class="text-term-amber">${topBracket.label}</span> at ${((topBracket.yes_price || 0) * 100).toFixed(0)}%` : 'No brackets'}
+          </div>
+        </div>`;
+    }
+
+    // ---- Helpers ----
+
+    function showStatus(msg, autoClearMs) {
+      const bar = document.getElementById('status-bar');
+      const el = document.getElementById('status-msg');
+      bar.classList.remove('hidden');
+      el.textContent = msg;
+      if (autoClearMs) setTimeout(() => bar.classList.add('hidden'), autoClearMs);
+    }
+
+    // ---- Init ----
+    loadOpportunities();
+  </script>
+
+</body>
+</html>

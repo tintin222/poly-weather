@@ -1,0 +1,120 @@
+"""Database schema definitions for poly-weather."""
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS cities (
+    city_key       TEXT PRIMARY KEY,
+    display_name   TEXT NOT NULL,
+    latitude       REAL NOT NULL,
+    longitude      REAL NOT NULL,
+    unit           TEXT NOT NULL CHECK(unit IN ('celsius', 'fahrenheit')),
+    timezone       TEXT NOT NULL,
+    wu_station_id  TEXT NOT NULL,
+    wu_url_path    TEXT NOT NULL,
+    is_active      INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS hourly_observations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_key       TEXT NOT NULL,
+    date           TEXT NOT NULL,
+    time_local     TEXT NOT NULL,
+    hour           INTEGER NOT NULL,
+    temperature    REAL NOT NULL,
+    dew_point      REAL,
+    humidity       REAL,
+    wind_speed     REAL,
+    wind_gust      REAL,
+    wind_direction TEXT,
+    pressure       REAL,
+    precip_rate    REAL,
+    condition      TEXT,
+    scraped_at     INTEGER NOT NULL,
+    UNIQUE(city_key, date, time_local)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hourly_city_date
+    ON hourly_observations(city_key, date);
+
+CREATE TABLE IF NOT EXISTS daily_peaks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_key          TEXT NOT NULL,
+    date              TEXT NOT NULL,
+    peak_temp         REAL NOT NULL,
+    peak_hour         INTEGER NOT NULL,
+    observation_count INTEGER NOT NULL,
+    computed_at       INTEGER NOT NULL,
+    UNIQUE(city_key, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_peaks_city_date
+    ON daily_peaks(city_key, date);
+
+CREATE TABLE IF NOT EXISTS polymarket_events (
+    event_id          TEXT PRIMARY KEY,
+    city_key          TEXT NOT NULL,
+    date              TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    slug              TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active',
+    winning_bracket   TEXT,
+    total_volume      REAL,
+    total_liquidity   REAL,
+    resolution_source TEXT,
+    updated_at        INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_city_date
+    ON polymarket_events(city_key, date);
+CREATE INDEX IF NOT EXISTS idx_events_status
+    ON polymarket_events(status);
+
+CREATE TABLE IF NOT EXISTS polymarket_brackets (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id          TEXT NOT NULL REFERENCES polymarket_events(event_id),
+    market_id         TEXT NOT NULL,
+    condition_id      TEXT NOT NULL,
+    bracket_label     TEXT NOT NULL,
+    clob_token_id_yes TEXT,
+    clob_token_id_no  TEXT,
+    current_yes_price REAL,
+    current_no_price  REAL,
+    volume            REAL,
+    tick_size         TEXT,
+    neg_risk          INTEGER NOT NULL DEFAULT 0,
+    price_updated_at  INTEGER,
+    UNIQUE(event_id, market_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_brackets_event
+    ON polymarket_brackets(event_id);
+CREATE INDEX IF NOT EXISTS idx_brackets_token
+    ON polymarket_brackets(clob_token_id_yes);
+
+CREATE TABLE IF NOT EXISTS bets (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id          TEXT NOT NULL,
+    bracket_id        INTEGER NOT NULL,
+    city_key          TEXT NOT NULL,
+    date              TEXT NOT NULL,
+    bracket_label     TEXT NOT NULL,
+    side              TEXT NOT NULL,
+    token_id          TEXT NOT NULL,
+    price             REAL NOT NULL,
+    size              REAL NOT NULL,
+    cost              REAL NOT NULL,
+    order_id          TEXT,
+    order_status      TEXT,
+    current_max_temp  REAL NOT NULL,
+    peak_hour         INTEGER NOT NULL,
+    model_confidence  REAL NOT NULL,
+    expected_value    REAL NOT NULL,
+    won               INTEGER,
+    pnl               REAL,
+    resolved_at       INTEGER,
+    is_paper          INTEGER NOT NULL DEFAULT 1,
+    created_at        INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bets_event ON bets(event_id);
+CREATE INDEX IF NOT EXISTS idx_bets_date ON bets(date);
+"""

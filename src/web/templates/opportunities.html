@@ -301,13 +301,21 @@
           </div>`;
       }
 
-      // Action buttons
+      // Status badges and action buttons
+      let statusBadges = '';
+      if (!w) {
+        statusBadges += `<span class="px-2 py-0.5 rounded text-[10px] bg-term-cyan/10 text-term-cyan border border-term-cyan/20 inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-term-cyan spinner inline-block border border-term-cyan border-t-transparent"></span>Auto-scraping...</span> `;
+      }
+      if (o.auto_backfill_running || (!o.peak_info?.has_history && !o.peak_info)) {
+        statusBadges += `<span class="px-2 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber border border-term-amber/20 inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-term-amber spinner inline-block border border-term-amber border-t-transparent"></span>Auto-backfilling 30d...</span>`;
+      }
+
       let actions = `
-        <div class="flex gap-2 mt-3">
+        <div class="flex items-center gap-2 mt-3">
           <button onclick="triggerScrape('${o.city_key}')" class="scrape-btn btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px]">
             ${w ? 'Re-scrape' : 'Scrape Now'}
           </button>
-          ${!o.peak_info?.has_history ? `<button onclick="triggerBackfill('${o.city_key}', 30)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 30d</button>` : ''}
+          ${statusBadges}
         </div>`;
 
       return `
@@ -318,7 +326,10 @@
               <span class="text-term-muted text-[11px]">${o.date}</span>
               ${historyBadge}
             </div>
-            ${o.current_hour !== null ? `<span class="text-term-muted text-[11px]">${o.current_hour}:00 local</span>` : ''}
+            <div class="flex items-center gap-3">
+              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" rel="noopener" class="px-2 py-0.5 rounded text-[10px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20 transition-colors">Polymarket &nearr;</a>` : ''}
+              ${o.current_hour !== null ? `<span class="text-term-muted text-[11px]">${o.current_hour}:00 local</span>` : ''}
+            </div>
           </div>
           <div class="p-4">
             ${weatherSection}
@@ -336,7 +347,10 @@
         <div class="card rounded-md relative p-3">
           <div class="flex items-center justify-between mb-1">
             <span class="font-display font-semibold text-term-bright text-[12px]">${o.city_name}</span>
-            <span class="text-term-muted text-[10px]">${o.date}</span>
+            <div class="flex items-center gap-2">
+              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" rel="noopener" class="text-[10px] text-term-purple hover:text-term-bright">PM&nearr;</a>` : ''}
+              <span class="text-term-muted text-[10px]">${o.date}</span>
+            </div>
           </div>
           <div class="text-[11px] text-term-muted">
             ${topBracket.label ? `Leading: <span class="text-term-amber">${topBracket.label}</span> at ${((topBracket.yes_price || 0) * 100).toFixed(0)}%` : 'No brackets'}
@@ -356,6 +370,12 @@
 
     // ---- Init ----
     loadOpportunities();
+
+    // Auto-reload every 30s to pick up completed scrapes/backfills
+    setInterval(() => {
+      const hasRunning = opportunities.some(o => o.auto_backfill_running || !o.weather);
+      if (hasRunning) loadOpportunities();
+    }, 30000);
   </script>
 
 </body>

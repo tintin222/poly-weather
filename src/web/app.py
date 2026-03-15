@@ -27,6 +27,8 @@ _db: Database | None = None
 
 # In-memory job tracking for async scrape/backfill tasks
 _jobs: dict[str, dict] = {}
+# Track which cities already have a backfill running/completed this session
+_backfill_started: set[str] = set()
 
 
 def get_db() -> Database:
@@ -36,6 +38,77 @@ def get_db() -> Database:
         _db = Database(settings.db_path)
         _db.initialize()
     return _db
+
+
+def _auto_backfill_if_needed(city_key: str) -> str | None:
+    """Start a 30-day backfill for a city if it has <5 days of data.
+
+    Returns the job_id if started, None if not needed.
+    """
+    if city_key in _backfill_started:
+        return None
+
+    db = get_db()
+    hist = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+        (city_key,),
+    ).fetchone()["cnt"]
+
+    if hist >= 5:
+        _backfill_started.add(city_key)  # already has enough
+        return None
+
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return None
+
+    _backfill_started.add(city_key)
+    job_id = f"auto-{city_key[:8].lower()}-{uuid.uuid4().hex[:4]}"
+    _jobs[job_id] = {
+        "status": "running", "type": "backfill", "city": city_key,
+        "days": 30, "started": time.time(), "auto": True,
+    }
+    log.info("auto_backfill_started", city=city_key, job_id=job_id)
+    asyncio.create_task(_run_backfill_job(job_id, city, 30))
+    return job_id
+
+
+# Track which cities have been auto-scraped today
+_scrape_started: set[str] = set()
+
+
+def _auto_scrape_if_needed(city_key: str, city, event_date: str) -> str | None:
+    """Auto-scrape today's WU data for a city if not already done."""
+    from src.utils.time_utils import today_in_tz
+
+    today = today_in_tz(city.timezone)
+    if event_date != today:
+        return None
+
+    scrape_key = f"{city_key}:{today}"
+    if scrape_key in _scrape_started:
+        return None
+
+    db = get_db()
+    existing = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM hourly_observations WHERE city_key = ? AND date = ?",
+        (city_key, today),
+    ).fetchone()["cnt"]
+
+    if existing > 0:
+        _scrape_started.add(scrape_key)
+        return None
+
+    _scrape_started.add(scrape_key)
+    job_id = f"auto-scrape-{city_key[:8].lower()}-{uuid.uuid4().hex[:4]}"
+    _jobs[job_id] = {
+        "status": "running", "type": "scrape", "city": city_key,
+        "started": time.time(), "auto": True,
+    }
+    log.info("auto_scrape_started", city=city_key, date=today, job_id=job_id)
+    asyncio.create_task(_run_scrape_job(job_id, city, today))
+    return job_id
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +335,19 @@ async def api_opportunities():
                 "condition_id": b["condition_id"],
             })
 
-        # Get today's weather observations
+        # Auto-backfill if this city lacks historical data
+        backfill_job_id = _auto_backfill_if_needed(city_key)
+
+        # Auto-scrape today if we don't have observations yet
+        _auto_scrape_if_needed(city_key, city, event_date)
+
+        # Get weather observations
         observations = weather_repo.get_hourly_observations(city_key, event_date)
         weather_data = None
         peak_info = None
         confidence_info = None
         recommendation = None
+        auto_backfill_running = backfill_job_id is not None
 
         if observations:
             max_temp, peak_hour = compute_current_max(observations)
@@ -329,12 +409,17 @@ async def api_opportunities():
                 "has_history": hist_peaks >= 5,
             }
 
+        slug = event["slug"]
+        polymarket_url = f"https://polymarket.com/event/{slug}" if slug else None
+
         opportunities.append({
             "event_id": event["event_id"],
             "city_key": city_key,
             "city_name": city.display_name if city else city_key,
             "date": event_date,
             "title": event["title"],
+            "slug": slug,
+            "polymarket_url": polymarket_url,
             "is_today": is_today,
             "current_hour": current_hour if is_today else None,
             "timezone": city.timezone if city else None,
@@ -344,6 +429,7 @@ async def api_opportunities():
             "peak_info": peak_info,
             "confidence": confidence_info,
             "recommendation": recommendation,
+            "auto_backfill_running": auto_backfill_running,
         })
 
     # Sort: today's events first, then by city

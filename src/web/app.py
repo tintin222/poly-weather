@@ -292,6 +292,7 @@ async def opportunities_page(request: Request):
 async def api_opportunities():
     """Build enriched opportunity data for each active temperature event today."""
     from config import settings
+    from src.model.bracket_analyzer import generate_guidance
     from src.model.features import compute_current_max
     from src.model.peak_predictor import PeakPredictor
     from src.polymarket.gamma_api import parse_brackets, parse_city_and_date
@@ -450,6 +451,53 @@ async def api_opportunities():
                 "matching_price": matching_price,
             }
 
+            # Generate bracket-level guidance with edge analysis
+            hist_peak_temps = [
+                r["peak_temp"] for r in db.conn.execute(
+                    "SELECT peak_temp FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
+                    (city_key,),
+                ).fetchall()
+            ]
+
+            if hist_peak_temps and len(hist_peak_temps) >= 5:
+                guidance = generate_guidance(
+                    city_key=city_key,
+                    date=event_date,
+                    historical_peaks=hist_peak_temps,
+                    brackets=bracket_list,
+                    current_temp=max_temp if observations else None,
+                    current_hour=current_hour if is_today else None,
+                    confidence_peak_passed=confidence_info["confidence"] if confidence_info else None,
+                    unit=city.unit if city else "celsius",
+                )
+                guidance_data = {
+                    "summary": guidance.summary,
+                    "historical_avg_high": guidance.historical_avg_high,
+                    "historical_median_high": guidance.historical_median_high,
+                    "historical_range": f"{guidance.historical_min_high}-{guidance.historical_max_high}",
+                    "predicted_bracket": guidance.predicted_bracket,
+                    "best_bet": {
+                        "label": guidance.best_bet.label,
+                        "our_probability": guidance.best_bet.our_probability,
+                        "market_probability": guidance.best_bet.market_probability,
+                        "edge": guidance.best_bet.edge,
+                        "verdict": guidance.best_bet.verdict,
+                    } if guidance.best_bet else None,
+                    "bracket_edges": [
+                        {
+                            "label": be.label,
+                            "our_prob": be.our_probability,
+                            "market_prob": be.market_probability,
+                            "edge": be.edge,
+                            "verdict": be.verdict,
+                            "is_best": be.is_best_bet,
+                        }
+                        for be in guidance.brackets
+                    ],
+                }
+            else:
+                guidance_data = None
+
         slug = event["slug"]
         polymarket_url = f"https://polymarket.com/event/{slug}" if slug else None
 
@@ -470,6 +518,7 @@ async def api_opportunities():
             "peak_info": peak_info,
             "confidence": confidence_info,
             "recommendation": recommendation,
+            "guidance": guidance_data if observations else None,
             "auto_backfill_running": auto_backfill_running,
         })
 

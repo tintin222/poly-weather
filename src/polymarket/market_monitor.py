@@ -111,6 +111,11 @@ class MarketMonitor:
         updated = 0
         for b, tid in zip(bracket_rows, yes_token_ids):
             yes_price = prices.get(tid, 0.0)
+
+            # Don't overwrite existing price with 0 (CLOB 404 = no liquidity, not price=0)
+            if yes_price <= 0 and (b["current_yes_price"] or 0) > 0:
+                continue
+
             no_price = round(1.0 - yes_price, 4) if yes_price > 0 else 0.0
 
             self._market_repo.upsert_bracket(

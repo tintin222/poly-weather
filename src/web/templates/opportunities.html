@@ -257,7 +257,90 @@
       const w = o.weather;
       const c = o.confidence;
       const r = o.recommendation;
+      const g = o.guidance;
 
+      // ---- GUIDANCE PANEL (top priority) ----
+      let guidanceHTML = '';
+      if (g) {
+        // Best bet callout
+        let bestBetHTML = '';
+        if (g.best_bet) {
+          const bb = g.best_bet;
+          const ourPct = (bb.our_probability * 100).toFixed(0);
+          const mktPct = (bb.market_probability * 100).toFixed(0);
+          const edgePct = (bb.edge * 100).toFixed(0);
+          bestBetHTML = `
+            <div class="p-3 rounded border-2 border-term-green/40 bg-term-green/5 mb-3">
+              <div class="flex items-center justify-between mb-1">
+                <div>
+                  <span class="text-term-green font-bold text-lg font-display">BUY ${bb.label}</span>
+                  <span class="text-term-green/70 text-[11px] ml-2">+${edgePct}% edge</span>
+                </div>
+                <button onclick='placeBet(${JSON.stringify({
+                  event_id: o.event_id, bracket_id: 0, token_id: "",
+                  price: bb.market_probability, size: 10, city_key: o.city_key, date: o.date,
+                  bracket_label: bb.label, current_max_temp: w?.max_temp || 0,
+                  peak_hour: w?.peak_hour || 0, model_confidence: bb.our_probability,
+                  expected_value: bb.edge
+                })})' class="btn px-4 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">Paper Bet ${mktPct}¢</button>
+              </div>
+              <div class="text-[11px] text-term-green/80">
+                Our model: ${ourPct}% likely | Market price: ${mktPct}¢ | Potential profit: +${edgePct}% per dollar
+              </div>
+            </div>`;
+        }
+
+        // Historical context
+        let histHTML = `
+          <div class="flex items-center gap-4 text-[11px] mb-2 px-1">
+            <div><span class="text-term-muted">30d avg high:</span> <span class="text-term-amber font-bold">${g.historical_avg_high}${unit}</span></div>
+            <div><span class="text-term-muted">range:</span> <span class="text-term-text">${g.historical_range}${unit}</span></div>
+            ${g.predicted_bracket ? `<div><span class="text-term-muted">most likely:</span> <span class="text-term-cyan font-bold">${g.predicted_bracket}</span></div>` : ''}
+          </div>`;
+
+        // Bracket edge table
+        let edgeTableHTML = '<div class="space-y-1 mb-3">';
+        g.bracket_edges.forEach(be => {
+          const ourPct = (be.our_prob * 100).toFixed(0);
+          const mktPct = (be.market_prob * 100).toFixed(0);
+          const edgePct = (be.edge * 100).toFixed(0);
+          const edgeSign = be.edge > 0 ? '+' : '';
+          const isBest = be.is_best;
+          const edgeColor = be.edge > 0.05 ? 'text-term-green' : be.edge < -0.05 ? 'text-term-red' : 'text-term-muted';
+          const rowBg = isBest ? 'bg-term-green/10 border-l-2 border-term-green pl-2' : '';
+          const maxProb = Math.max(...g.bracket_edges.map(b => b.our_prob), 0.01);
+          const barW = Math.max((be.our_prob / maxProb) * 100, 1);
+
+          edgeTableHTML += `
+            <div class="flex items-center gap-1 text-[11px] ${rowBg} py-0.5 rounded-sm">
+              <span class="w-24 text-term-bright truncate">${be.label}</span>
+              <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden relative">
+                <div class="h-full rounded-sm ${isBest ? 'bg-term-green/40' : 'bg-term-cyan/20'}" style="width:${barW}%"></div>
+                ${be.market_prob > 0 ? `<div class="absolute top-0 h-full border-r-2 border-term-amber/60" style="left:${Math.min(be.market_prob / maxProb * 100, 100)}%" title="market price"></div>` : ''}
+              </div>
+              <span class="w-10 text-right text-term-cyan">${ourPct}%</span>
+              <span class="w-8 text-right text-term-amber">${mktPct}¢</span>
+              <span class="w-10 text-right font-bold ${edgeColor}">${edgeSign}${edgePct}%</span>
+              ${isBest ? '<span class="text-[9px] text-term-green font-bold">BUY</span>' : ''}
+            </div>`;
+        });
+        edgeTableHTML += '</div>';
+
+        // Column headers for edge table
+        let edgeHeaderHTML = `
+          <div class="flex items-center gap-1 text-[10px] text-term-muted uppercase tracking-wider mb-1 px-1">
+            <span class="w-24">Bracket</span>
+            <span class="flex-1">Our Probability</span>
+            <span class="w-10 text-right">Ours</span>
+            <span class="w-8 text-right">Mkt</span>
+            <span class="w-10 text-right">Edge</span>
+            <span class="w-8"></span>
+          </div>`;
+
+        guidanceHTML = bestBetHTML + histHTML + edgeHeaderHTML + edgeTableHTML;
+      }
+
+      // ---- WEATHER DATA ----
       let weatherSection = '';
       if (w) {
         weatherSection = `
@@ -267,102 +350,46 @@
             <span class="text-term-muted">(${w.observation_count} readings)</span>
           </div>`;
       } else {
-        weatherSection = `
-          <div class="text-term-muted mb-2">No weather data scraped yet</div>`;
+        weatherSection = `<div class="text-term-muted mb-2">No weather data scraped yet</div>`;
       }
 
+      // ---- CONFIDENCE ----
       let confidenceSection = '';
       if (c) {
         const confPct = (c.confidence * 100).toFixed(0);
         const confColor = c.confidence >= 0.85 ? 'text-term-green' : c.confidence >= 0.5 ? 'text-term-amber' : 'text-term-red';
         confidenceSection = `
           <div class="flex items-center gap-4 mb-2 text-[11px]">
-            <div>
-              <span class="text-term-muted">Confidence:</span>
-              <span class="${confColor} font-bold text-sm">${confPct}%</span>
-            </div>
-            <div class="text-term-muted">Peak hour avg: ${c.mean_peak_hour}:00</div>
-            <div class="text-term-muted">${c.hours_past_mean > 0 ? '+' : ''}${c.hours_past_mean.toFixed(1)}h past mean</div>
+            <div><span class="text-term-muted">Peak passed:</span> <span class="${confColor} font-bold">${confPct}%</span></div>
+            <div class="text-term-muted">avg peak hour: ${c.mean_peak_hour}:00</div>
           </div>`;
       }
 
       let historyBadge = '';
       if (o.peak_info) {
-        if (o.peak_info.has_history) {
-          historyBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">${o.peak_info.historical_days}d history</span>`;
-        } else {
-          historyBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">${o.peak_info.historical_days}d data</span>`;
-        }
+        historyBadge = o.peak_info.has_history
+          ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">${o.peak_info.historical_days}d</span>`
+          : `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">${o.peak_info.historical_days}d</span>`;
       }
 
-      // Determine matching bracket from peak_info or recommendation
-      const matchLabel = o.peak_info?.matching_bracket || (r && r.bracket_label);
-
-      // Brackets
-      let bracketsHTML = '';
-      if (o.brackets.length) {
+      // ---- FALLBACK: plain brackets if no guidance ----
+      let fallbackBrackets = '';
+      if (!g && o.brackets.length) {
         const maxPrice = Math.max(...o.brackets.map(b => b.yes_price || 0), 0.01);
-        bracketsHTML = `<div class="space-y-1 mb-3">`;
+        fallbackBrackets = '<div class="space-y-1 mb-3">';
         o.brackets.forEach(b => {
           const pct = ((b.yes_price || 0) * 100).toFixed(0);
           const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
-          const isMatch = matchLabel && matchLabel === b.label;
-          const highlight = isMatch ? 'bg-term-cyan/20 border-l-2 border-term-cyan pl-2' : '';
-          bracketsHTML += `
-            <div class="flex items-center gap-2 text-[11px] ${highlight} py-0.5 rounded-sm">
+          fallbackBrackets += `
+            <div class="flex items-center gap-2 text-[11px] py-0.5 rounded-sm">
               <span class="w-28 text-term-bright">${b.label}</span>
               <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden">
-                <div class="h-full rounded-sm ${isMatch ? 'bg-term-cyan/50' : 'bg-term-muted/30'}" style="width:${barW}%"></div>
+                <div class="h-full rounded-sm bg-term-muted/30" style="width:${barW}%"></div>
               </div>
-              <span class="w-10 text-right ${isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
-              ${isMatch ? `<span class="text-[9px] text-term-cyan">${w ? w.max_temp + unit : ''} ← PEAK</span>` : ''}
+              <span class="w-10 text-right text-term-muted">${pct}%</span>
             </div>`;
         });
-        bracketsHTML += `</div>`;
-      }
-
-      // Recommendation - always show something
-      let recoHTML = '';
-      if (r) {
-        const isGood = r.action === 'BUY' || r.action === 'STRONG_BUY';
-        const isWait = r.action === 'WAIT';
-        const actionColor = isGood
-          ? 'bg-term-green/10 text-term-green border-term-green/20'
-          : isWait
-            ? 'bg-term-amber/10 text-term-amber border-term-amber/20'
-            : 'bg-term-surface text-term-muted border-term-border';
-        const actionIcon = isGood ? '→' : isWait ? '⏳' : '✗';
-
-        let detailLine = '';
-        if (r.bracket_label && r.market_price > 0) {
-          const evPct = (r.expected_value * 100).toFixed(1);
-          detailLine = `<span class="text-[11px] ml-2">${r.bracket_label} @ ${(r.market_price * 100).toFixed(0)}¢</span>
-            <span class="text-[11px] ml-2 ${r.expected_value > 0 ? 'text-term-green' : r.expected_value < 0 ? 'text-term-red' : 'text-term-muted'}">EV: ${evPct}%</span>`;
-        }
-
-        recoHTML = `
-          <div class="p-2 rounded border ${actionColor}">
-            <div class="flex items-center justify-between">
-              <div>
-                <span class="font-bold text-sm">${actionIcon} ${r.action}</span>
-                ${detailLine}
-              </div>
-              ${isGood ? `<button onclick='placeBet(${JSON.stringify({
-                event_id: o.event_id, bracket_id: r.bracket_id, token_id: r.token_id_yes,
-                price: r.market_price, size: 10, city_key: o.city_key, date: o.date,
-                bracket_label: r.bracket_label, current_max_temp: w?.max_temp || 0,
-                peak_hour: w?.peak_hour || 0, model_confidence: c?.confidence || 0,
-                expected_value: r.expected_value
-              })})' class="btn px-3 py-1 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[11px] font-medium">Paper Bet</button>` : ''}
-            </div>
-            <div class="text-[10px] mt-1 opacity-75">${r.reason}</div>
-          </div>`;
-      } else if (w && !c) {
-        recoHTML = `
-          <div class="p-2 rounded border bg-term-amber/10 text-term-amber border-term-amber/20">
-            <span class="font-bold text-sm">⏳ WAIT</span>
-            <div class="text-[10px] mt-1 opacity-75">Need historical data for confidence model. Backfill in progress...</div>
-          </div>`;
+        fallbackBrackets += '</div>';
       }
 
       // Status badges and action buttons
@@ -398,8 +425,7 @@
           <div class="p-4">
             ${weatherSection}
             ${confidenceSection}
-            ${bracketsHTML}
-            ${recoHTML}
+            ${guidanceHTML || fallbackBrackets}
             ${actions}
           </div>
         </div>`;

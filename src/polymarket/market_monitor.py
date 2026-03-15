@@ -1,13 +1,14 @@
 """Market monitor for discovering and tracking Polymarket temperature events.
 
-Periodically polls the Gamma API for new temperature events, stores them
-in the database, and updates bracket prices via the CLOB API.
+Polls the Gamma API for temperature events and stores brackets with their
+outcome prices. The Gamma API is the authoritative price source — it returns
+inline outcomePrices for each market which match the Polymarket UI.
 """
 
 from __future__ import annotations
 
 from src.db.repositories import MarketRepository
-from src.polymarket import clob_api, gamma_api
+from src.polymarket import gamma_api
 from src.polymarket.gamma_api import parse_brackets, parse_city_and_date
 from src.utils.logger import get_logger
 from src.weather.cities import get_city
@@ -21,24 +22,25 @@ class MarketMonitor:
     def __init__(self, market_repo: MarketRepository) -> None:
         self._market_repo = market_repo
 
-    async def poll_temperature_events(self) -> int:
-        """Fetch temperature events (active + recently closed) and update DB.
+    async def poll_all(self) -> int:
+        """Full poll cycle: fetch events from Gamma API with prices.
 
-        Returns:
-            Number of events processed.
+        The Gamma API returns outcomePrices inline with each market,
+        so a single call gives us both events and current prices.
+        No separate CLOB price fetches needed.
         """
-        # Fetch both active and closed events to catch settlements
+        # Fetch active events (with prices)
         active_events = await gamma_api.get_temperature_events(active_only=True)
+        # Also fetch recent closed to detect settlements
         closed_events = await gamma_api.get_temperature_events(active_only=False, limit=50)
 
-        # Merge: active events + any closed events not in active set
         active_ids = {e.event_id for e in active_events}
         all_events = list(active_events)
         for e in closed_events:
             if e.event_id not in active_ids:
                 all_events.append(e)
 
-        log.info("polled_temperature_events", active=len(active_events), closed=len(closed_events) - len(active_events))
+        log.info("polled_events", active=len(active_events), total=len(all_events))
 
         processed = 0
         for event in all_events:
@@ -50,14 +52,12 @@ class MarketMonitor:
             city_config = get_city(city_display)
             city_key = city_config.key if city_config else city_display
 
-            # Determine status
             status = "active"
             if event.closed:
                 status = "closed"
             elif not event.active:
                 status = "inactive"
 
-            # Upsert the event
             self._market_repo.upsert_event(
                 event_id=event.event_id,
                 city_key=city_key,
@@ -69,7 +69,7 @@ class MarketMonitor:
                 total_liquidity=float(event.liquidity) if event.liquidity else None,
             )
 
-            # Parse and store brackets with Gamma API prices (primary source)
+            # Gamma API outcomePrices are the authoritative price source
             brackets = parse_brackets(event)
             for bracket in brackets:
                 self._market_repo.upsert_bracket(
@@ -86,7 +86,7 @@ class MarketMonitor:
 
             processed += 1
 
-        # Mark any DB events as closed if they're no longer in the active set
+        # Mark DB events as closed if no longer in active set
         db_active = self._market_repo.get_active_events()
         for db_event in db_active:
             if db_event["event_id"] not in active_ids:
@@ -101,72 +101,3 @@ class MarketMonitor:
 
         log.info("events_processed", count=processed)
         return processed
-
-    async def update_bracket_prices(self, event_id: str) -> int:
-        """Update current prices for all brackets of an event from the CLOB API.
-
-        Returns:
-            Number of brackets updated.
-        """
-        brackets = self._market_repo.get_brackets_for_event(event_id)
-        if not brackets:
-            log.debug("no_brackets_for_event", event_id=event_id)
-            return 0
-
-        # Collect all yes-token IDs for batch price fetch
-        yes_token_ids: list[str] = []
-        bracket_rows = []
-        for b in brackets:
-            tid = b["clob_token_id_yes"]
-            if tid:
-                yes_token_ids.append(tid)
-                bracket_rows.append(b)
-
-        if not yes_token_ids:
-            return 0
-
-        # Batch fetch prices
-        prices = await clob_api.get_prices_batch(yes_token_ids)
-
-        updated = 0
-        for b, tid in zip(bracket_rows, yes_token_ids):
-            yes_price = prices.get(tid, 0.0)
-
-            # Don't overwrite existing price with 0 (CLOB 404 = no liquidity, not price=0)
-            if yes_price <= 0 and (b["current_yes_price"] or 0) > 0:
-                continue
-
-            no_price = round(1.0 - yes_price, 4) if yes_price > 0 else 0.0
-
-            self._market_repo.upsert_bracket(
-                event_id=b["event_id"],
-                market_id=b["market_id"],
-                condition_id=b["condition_id"],
-                bracket_label=b["bracket_label"],
-                clob_token_id_yes=b["clob_token_id_yes"],
-                clob_token_id_no=b["clob_token_id_no"],
-                current_yes_price=yes_price,
-                current_no_price=no_price,
-                neg_risk=bool(b["neg_risk"]),
-            )
-            updated += 1
-
-        log.info("bracket_prices_updated", event_id=event_id, count=updated)
-        return updated
-
-    async def poll_all(self) -> None:
-        """Full poll cycle: discover events then update prices for all active events."""
-        # Step 1: Discover / update events
-        await self.poll_temperature_events()
-
-        # Step 2: Update prices for all active events
-        active_events = self._market_repo.get_active_events()
-        for event_row in active_events:
-            try:
-                await self.update_bracket_prices(event_row["event_id"])
-            except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "price_update_error",
-                    event_id=event_row["event_id"],
-                    error=str(exc),
-                )

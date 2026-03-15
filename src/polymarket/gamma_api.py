@@ -19,19 +19,13 @@ log = get_logger(__name__)
 
 BASE_URL = "https://gamma-api.polymarket.com"
 
-# Reusable client – created lazily so the module can be imported without side effects.
-_client: httpx.AsyncClient | None = None
-
-
-def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            base_url=BASE_URL,
-            timeout=30.0,
-            headers={"Accept": "application/json"},
-        )
-    return _client
+def _new_client() -> httpx.AsyncClient:
+    """Create a fresh HTTP client (avoids event loop binding issues)."""
+    return httpx.AsyncClient(
+        base_url=BASE_URL,
+        timeout=30.0,
+        headers={"Accept": "application/json"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -59,10 +53,11 @@ async def get_temperature_events(
         params["active"] = "true"
         params["closed"] = "false"
 
-    client = _get_client()
     try:
-        resp = await client.get("/events", params=params)
-        resp.raise_for_status()
+        async with _new_client() as client:
+            resp = await client.get("/events", params=params)
+            resp.raise_for_status()
+            data = resp.json()
     except httpx.HTTPStatusError as exc:
         log.error("gamma_api_events_error", status=exc.response.status_code, detail=str(exc))
         return []
@@ -70,7 +65,6 @@ async def get_temperature_events(
         log.error("gamma_api_request_error", detail=str(exc))
         return []
 
-    data = resp.json()
     if not isinstance(data, list):
         log.warning("gamma_api_unexpected_response", data_type=type(data).__name__)
         return []
@@ -87,18 +81,17 @@ async def get_temperature_events(
 async def get_event(event_id: str) -> GammaEvent | None:
     """Fetch a single event by its ID."""
     await gamma_api_limiter.acquire()
-    client = _get_client()
     try:
-        resp = await client.get(f"/events/{event_id}")
-        resp.raise_for_status()
+        async with _new_client() as client:
+            resp = await client.get(f"/events/{event_id}")
+            resp.raise_for_status()
+            data = resp.json()
     except httpx.HTTPStatusError as exc:
         log.error("gamma_api_event_error", event_id=event_id, status=exc.response.status_code)
         return None
     except httpx.RequestError as exc:
         log.error("gamma_api_request_error", event_id=event_id, detail=str(exc))
         return None
-
-    data = resp.json()
     if not data:
         return None
 
@@ -229,9 +222,3 @@ def parse_brackets(event: GammaEvent) -> list[BracketInfo]:
     return brackets
 
 
-async def close() -> None:
-    """Close the shared HTTP client."""
-    global _client
-    if _client and not _client.is_closed:
-        await _client.aclose()
-        _client = None

@@ -48,7 +48,23 @@ def _auto_backfill_if_needed(city_key: str) -> str | None:
     Returns the job_id if started, None if not needed.
     """
     if city_key in _backfill_started:
-        return None
+        # Check if the job is still running
+        running = any(
+            j.get("city") == city_key and j.get("type") == "backfill" and j.get("status") == "running"
+            for j in _jobs.values()
+        )
+        if running:
+            return None
+        # Job finished — check if we need more data
+        db = get_db()
+        hist = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
+        if hist >= 5:
+            return None
+        # Need more data — allow retry
+        _backfill_started.discard(city_key)
 
     db = get_db()
     hist = db.conn.execute(
@@ -57,7 +73,7 @@ def _auto_backfill_if_needed(city_key: str) -> str | None:
     ).fetchone()["cnt"]
 
     if hist >= 5:
-        _backfill_started.add(city_key)  # already has enough
+        _backfill_started.add(city_key)
         return None
 
     from src.weather.cities import get_city

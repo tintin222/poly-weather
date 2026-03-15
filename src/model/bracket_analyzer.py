@@ -117,7 +117,7 @@ def compute_bracket_probabilities(
         # = our_prob - market_price
         ev_per_dollar = edge
 
-        if market_price > 0 and edge > 0.05:
+        if edge > 0.05 and our_prob >= 0.05:
             verdict = "BUY"
         elif market_price > 0 and edge < -0.10:
             verdict = "AVOID"
@@ -133,8 +133,9 @@ def compute_bracket_probabilities(
             verdict=verdict,
         ))
 
-    # Mark best bet (highest positive edge with market price > 0)
-    buyable = [b for b in results if b.edge > 0.03 and b.market_probability > 0]
+    # Mark best bet: highest positive edge where our probability is meaningful
+    # Allow 0¢ market price (can place limit order at 1¢)
+    buyable = [b for b in results if b.edge > 0.03 and b.our_probability >= 0.05]
     if buyable:
         best = max(buyable, key=lambda b: b.edge)
         best.is_best_bet = True

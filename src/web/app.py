@@ -29,6 +29,8 @@ _db: Database | None = None
 _jobs: dict[str, dict] = {}
 # Track which cities already have a backfill running/completed this session
 _backfill_started: set[str] = set()
+# Semaphore: only 1 Playwright browser at a time to avoid resource contention
+_scrape_semaphore = asyncio.Semaphore(1)
 
 
 def get_db() -> Database:
@@ -469,43 +471,45 @@ async def api_scrape(city_key: str, date: str | None = None):
 
 
 async def _run_scrape_job(job_id: str, city, date: str | None):
-    """Background task: scrape WU and store results."""
+    """Background task: scrape WU and store results. Uses semaphore for 1-at-a-time."""
     from src.utils.time_utils import today_in_tz
     from src.weather.scraper import WUScraper
 
-    db = get_db()
-    repo = WeatherRepository(db)
-    scrape_date = date or today_in_tz(city.timezone)
+    async with _scrape_semaphore:
+        log.info("scrape_job_acquired_lock", job_id=job_id, city=city.key)
+        db = get_db()
+        repo = WeatherRepository(db)
+        scrape_date = date or today_in_tz(city.timezone)
 
-    try:
-        scraper = WUScraper(headless=True)
-        await scraper.start()
         try:
-            observations = await scraper.scrape_daily(city, scrape_date)
-        finally:
-            await scraper.stop()
+            scraper = WUScraper(headless=True)
+            await scraper.start()
+            try:
+                observations = await scraper.scrape_daily(city, scrape_date)
+            finally:
+                await scraper.stop()
 
-        if observations:
-            obs_dicts = [obs.to_dict() for obs in observations]
-            count = repo.upsert_hourly_observations_batch(city.key, scrape_date, obs_dicts)
+            if observations:
+                obs_dicts = [obs.to_dict() for obs in observations]
+                count = repo.upsert_hourly_observations_batch(city.key, scrape_date, obs_dicts)
 
-            peak_obs = max(observations, key=lambda o: o.temperature)
-            repo.upsert_daily_peak(
-                city_key=city.key, date=scrape_date,
-                peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
-                observation_count=len(observations),
-            )
-            _jobs[job_id] = {
-                "status": "complete", "type": "scrape", "city": city.key,
-                "date": scrape_date, "observations": count,
-                "peak_temp": peak_obs.temperature, "peak_hour": peak_obs.hour,
-            }
-        else:
-            _jobs[job_id] = {"status": "complete", "type": "scrape", "city": city.key, "observations": 0}
+                peak_obs = max(observations, key=lambda o: o.temperature)
+                repo.upsert_daily_peak(
+                    city_key=city.key, date=scrape_date,
+                    peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
+                    observation_count=len(observations),
+                )
+                _jobs[job_id] = {
+                    "status": "complete", "type": "scrape", "city": city.key,
+                    "date": scrape_date, "observations": count,
+                    "peak_temp": peak_obs.temperature, "peak_hour": peak_obs.hour,
+                }
+            else:
+                _jobs[job_id] = {"status": "complete", "type": "scrape", "city": city.key, "observations": 0}
 
-    except Exception as exc:
-        log.error("scrape_job_failed", job_id=job_id, error=str(exc))
-        _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
+        except Exception as exc:
+            log.error("scrape_job_failed", job_id=job_id, error=str(exc))
+            _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
 
 
 @app.post("/api/backfill/{city_key}")
@@ -527,34 +531,36 @@ async def api_backfill(city_key: str, days: int = 30):
 
 
 async def _run_backfill_job(job_id: str, city, days: int):
-    """Background task: backfill historical data."""
+    """Background task: backfill historical data. Uses semaphore for 1-at-a-time."""
     from src.weather.historical_loader import HistoricalLoader
     from src.weather.scraper import WUScraper
 
-    db = get_db()
-    repo = WeatherRepository(db)
+    async with _scrape_semaphore:
+        log.info("backfill_job_acquired_lock", job_id=job_id, city=city.key)
+        db = get_db()
+        repo = WeatherRepository(db)
 
-    try:
-        scraper = WUScraper(headless=True)
-        await scraper.start()
         try:
-            loader = HistoricalLoader(scraper, repo)
-            await loader.backfill(city, days=days)
-        finally:
-            await scraper.stop()
+            scraper = WUScraper(headless=True)
+            await scraper.start()
+            try:
+                loader = HistoricalLoader(scraper, repo)
+                await loader.backfill(city, days=days)
+            finally:
+                await scraper.stop()
 
-        total = db.conn.execute(
-            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
-            (city.key,),
-        ).fetchone()["cnt"]
+            total = db.conn.execute(
+                "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+                (city.key,),
+            ).fetchone()["cnt"]
 
-        _jobs[job_id] = {
-            "status": "complete", "type": "backfill", "city": city.key,
-            "days": days, "total_peaks": total,
-        }
-    except Exception as exc:
-        log.error("backfill_job_failed", job_id=job_id, error=str(exc))
-        _jobs[job_id] = {"status": "error", "type": "backfill", "error": str(exc)}
+            _jobs[job_id] = {
+                "status": "complete", "type": "backfill", "city": city.key,
+                "days": days, "total_peaks": total,
+            }
+        except Exception as exc:
+            log.error("backfill_job_failed", job_id=job_id, error=str(exc))
+            _jobs[job_id] = {"status": "error", "type": "backfill", "error": str(exc)}
 
 
 @app.get("/api/job/{job_id}")

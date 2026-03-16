@@ -29,8 +29,9 @@ _db: Database | None = None
 _jobs: dict[str, dict] = {}
 # Track which cities already have a backfill running/completed this session
 _backfill_started: set[str] = set()
-# Separate semaphores: today scrapes don't block on backfills
-_scrape_semaphore = asyncio.Semaphore(2)  # 2 concurrent: 1 scrape + 1 backfill
+# Separate semaphores so scrapes aren't blocked by backfills
+_scrape_semaphore = asyncio.Semaphore(3)   # for today's scrapes (fast, ~5s each)
+_backfill_semaphore = asyncio.Semaphore(1)  # for 30-day backfills (slow, ~2min each)
 
 
 def get_db() -> Database:
@@ -568,11 +569,11 @@ async def api_backfill(city_key: str, days: int = 30):
 
 
 async def _run_backfill_job(job_id: str, city, days: int):
-    """Background task: backfill historical data. Uses semaphore for 1-at-a-time."""
+    """Background task: backfill historical data. Uses its own semaphore."""
     from src.weather.historical_loader import HistoricalLoader
     from src.weather.scraper import WUScraper
 
-    async with _scrape_semaphore:
+    async with _backfill_semaphore:
         log.info("backfill_job_acquired_lock", job_id=job_id, city=city.key)
         db = get_db()
         repo = WeatherRepository(db)

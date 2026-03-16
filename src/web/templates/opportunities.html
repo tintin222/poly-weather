@@ -11,9 +11,7 @@
       theme: {
         extend: {
           fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
-          colors: {
-            term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' }
-          }
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
         }
       }
     }
@@ -21,16 +19,14 @@
   <style>
     body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
     .card { background: #0f1419; border: 1px solid #1a2030; }
-    .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(0,200,255,0.15), transparent); }
     ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
     @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } } .spinner { animation: spin 1s linear infinite; }
     .btn { transition: all 0.15s; } .btn:hover { filter: brightness(1.2); } .btn:active { transform: scale(0.97); }
+    input[type="number"] { background: #0a0e14; border: 1px solid #1a2030; color: #c5d4e8; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
   </style>
 </head>
 <body class="text-term-text text-xs min-h-screen">
 
-  <!-- Header -->
   <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
     <div class="flex items-center gap-4">
       <a href="/" class="flex items-center gap-2 hover:opacity-80">
@@ -44,449 +40,295 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
-      <button onclick="toggleSettled()" id="filter-settled-btn"
-        class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">
-        Show settled
-      </button>
-      <button onclick="refreshMarkets()" id="refresh-btn"
-        class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">
-        Refresh Markets
-      </button>
-      <button onclick="loadOpportunities()" class="btn px-3 py-1.5 rounded bg-term-surface text-term-text border border-term-border text-[11px]">
-        Reload
-      </button>
+      <button onclick="toggleSettled()" id="filter-settled-btn" class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">Show settled</button>
+      <button onclick="refreshMarkets()" id="refresh-btn" class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">Refresh Markets</button>
+      <button onclick="loadOpportunities()" class="btn px-3 py-1.5 rounded bg-term-surface text-term-text border border-term-border text-[11px]">Reload</button>
     </div>
   </header>
 
-  <!-- Status bar -->
   <div id="status-bar" class="px-4 py-1.5 text-[10px] text-term-muted border-b border-term-border hidden">
     <span id="status-msg"></span>
   </div>
 
-  <!-- Main content -->
   <main class="p-4 max-w-[1400px] mx-auto">
     <div id="opportunities-container" class="space-y-4">
-      <div class="text-center py-16 text-term-muted">
-        <div class="text-lg mb-2">Loading opportunities...</div>
-        <div class="text-[11px]">Fetching active Polymarket temperature markets</div>
-      </div>
+      <div class="text-center py-16 text-term-muted">Loading...</div>
     </div>
   </main>
 
   <script>
     let opportunities = [];
-
-    // ---- API calls ----
-
-    async function loadOpportunities() {
-      showStatus('Loading opportunities...');
-      try {
-        const res = await fetch('/api/opportunities');
-        opportunities = await res.json();
-        render();
-        showStatus(`Loaded ${opportunities.length} opportunities`, 2000);
-      } catch (e) {
-        showStatus('Error loading opportunities: ' + e.message);
-      }
-    }
-
-    async function refreshMarkets() {
-      const btn = document.getElementById('refresh-btn');
-      btn.textContent = 'Refreshing...';
-      btn.disabled = true;
-      showStatus('Polling Polymarket for latest events and prices...');
-      try {
-        await fetch('/api/refresh-markets', { method: 'POST' });
-        showStatus('Markets refreshed. Reloading opportunities...');
-        await loadOpportunities();
-      } catch (e) {
-        showStatus('Error: ' + e.message);
-      } finally {
-        btn.textContent = 'Refresh Markets';
-        btn.disabled = false;
-      }
-    }
-
-    async function triggerScrape(cityKey) {
-      const card = document.getElementById('card-' + cityKey);
-      const btn = card?.querySelector('.scrape-btn');
-      if (btn) { btn.textContent = 'Scraping...'; btn.disabled = true; }
-      showStatus(`Scraping Weather Underground for ${cityKey}...`);
-      try {
-        const res = await fetch(`/api/scrape/${encodeURIComponent(cityKey)}`, { method: 'POST' });
-        const data = await res.json();
-        if (data.job_id) {
-          pollJob(data.job_id, cityKey, 'scrape');
-        }
-      } catch (e) {
-        showStatus('Scrape error: ' + e.message);
-        if (btn) { btn.textContent = 'Scrape Now'; btn.disabled = false; }
-      }
-    }
-
-    async function triggerBackfill(cityKey, days = 30) {
-      showStatus(`Starting ${days}-day backfill for ${cityKey}... This may take several minutes.`);
-      try {
-        const res = await fetch(`/api/backfill/${encodeURIComponent(cityKey)}?days=${days}`, { method: 'POST' });
-        const data = await res.json();
-        if (data.job_id) {
-          pollJob(data.job_id, cityKey, 'backfill');
-        }
-      } catch (e) {
-        showStatus('Backfill error: ' + e.message);
-      }
-    }
-
-    async function pollJob(jobId, cityKey, type) {
-      const poll = async () => {
-        try {
-          const res = await fetch(`/api/job/${jobId}`);
-          const data = await res.json();
-          if (data.status === 'running') {
-            const elapsed = Math.round((Date.now() / 1000) - data.started);
-            showStatus(`${type === 'backfill' ? 'Backfilling' : 'Scraping'} ${cityKey}... (${elapsed}s)`);
-            setTimeout(poll, 2000);
-          } else if (data.status === 'complete') {
-            if (type === 'scrape') {
-              showStatus(`Scraped ${data.observations} observations for ${cityKey}. Peak: ${data.peak_temp}° at ${data.peak_hour}:00`);
-            } else {
-              showStatus(`Backfill complete for ${cityKey}. ${data.total_peaks} total days of data.`);
-            }
-            await loadOpportunities();
-          } else {
-            showStatus(`${type} error: ${data.error || 'Unknown error'}`);
-          }
-        } catch (e) {
-          showStatus('Poll error: ' + e.message);
-        }
-      };
-      setTimeout(poll, 2000);
-    }
-
-    async function placeBetWithAmount(inputId, params) {
-      const amt = parseFloat(document.getElementById(inputId).value) || 10;
-      const size = Math.round(amt / params.price * 100) / 100;
-      params.size = size;
-      return placeBet(params);
-    }
-
-    async function placeBet(params) {
-      if (!params.size) params.size = 10;
-      const cost = (params.price * params.size).toFixed(2);
-      if (!confirm(`Place paper bet: ${params.bracket_label} @ ${(params.price*100).toFixed(0)}¢ — $${cost} to win $${params.size.toFixed(2)}?`)) return;
-      showStatus('Placing paper bet...');
-      try {
-        const qs = new URLSearchParams(params).toString();
-        const res = await fetch('/api/place-bet?' + qs, { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-          showStatus(`Paper bet placed! Order: ${data.order_id}`);
-          await loadOpportunities();
-        } else {
-          showStatus('Bet failed: ' + (data.error_msg || 'Unknown'));
-        }
-      } catch (e) {
-        showStatus('Bet error: ' + e.message);
-      }
-    }
-
-    // ---- Filters ----
-
-    let hideSettled = true; // default: hide 100% settled markets
+    let hideSettled = true;
 
     function isSettled(o) {
-      // A market is "settled" if closed or any bracket is at 100%
-      return o.is_closed || o.brackets.some(b => (b.yes_price || 0) >= 0.99);
+      return o.is_closed || (o.g && o.g.brackets && o.g.brackets.some(b => (b.yes_price || 0) >= 0.99));
     }
 
     function toggleSettled() {
       hideSettled = !hideSettled;
-      const btn = document.getElementById('filter-settled-btn');
-      btn.textContent = hideSettled ? 'Show settled' : 'Hide settled';
-      btn.className = hideSettled
-        ? 'btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]'
-        : 'btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]';
+      document.getElementById('filter-settled-btn').textContent = hideSettled ? 'Show settled' : 'Hide settled';
       render();
+    }
+
+    async function loadOpportunities() {
+      try {
+        const res = await fetch('/api/opportunities');
+        opportunities = await res.json();
+        render();
+      } catch (e) { showStatus('Error: ' + e.message); }
+    }
+
+    async function refreshMarkets() {
+      showStatus('Refreshing markets...');
+      await fetch('/api/refresh-markets', { method: 'POST' });
+      await loadOpportunities();
+      showStatus('Done', 2000);
+    }
+
+    async function triggerScrape(cityKey) {
+      showStatus(`Scraping ${cityKey}...`);
+      const res = await fetch(`/api/scrape/${encodeURIComponent(cityKey)}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.job_id) pollJob(data.job_id, cityKey);
+    }
+
+    async function pollJob(jobId, cityKey) {
+      const poll = async () => {
+        const res = await fetch(`/api/job/${jobId}`);
+        const data = await res.json();
+        if (data.status === 'running') { setTimeout(poll, 2000); return; }
+        if (data.status === 'complete') showStatus(`${cityKey}: ${data.observations} obs, peak ${data.peak_temp}°`, 3000);
+        else showStatus(`Error: ${data.error}`, 5000);
+        await loadOpportunities();
+      };
+      setTimeout(poll, 2000);
+    }
+
+    async function placeBet(params) {
+      const amt = parseFloat(document.getElementById(`bet-amt-${params.city_key}`)?.value || 10);
+      const size = Math.round(amt / params.price * 100) / 100;
+      params.size = size;
+      const cost = (params.price * size).toFixed(2);
+      if (!confirm(`Paper bet: ${params.bracket_label} @ ${(params.price*100).toFixed(0)}¢ — $${cost}?`)) return;
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch('/api/place-bet?' + qs, { method: 'POST' });
+      const data = await res.json();
+      showStatus(data.success ? `Bet placed: ${data.order_id}` : `Failed: ${data.error_msg}`, 3000);
+      await loadOpportunities();
+    }
+
+    function timeAgo(ts) {
+      if (!ts) return 'never';
+      const s = Math.round(Date.now() / 1000 - ts);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.round(s/60)}m ago`;
+      return `${Math.round(s/3600)}h ago`;
     }
 
     // ---- Render ----
 
     function render() {
       const container = document.getElementById('opportunities-container');
-      if (!opportunities.length) {
-        container.innerHTML = `
-          <div class="text-center py-16 text-term-muted">
-            <div class="text-lg mb-2">No opportunities found</div>
-            <div class="text-[11px]">Click "Refresh Markets" to fetch active Polymarket temperature events.</div>
-          </div>`;
-        return;
-      }
-
-      // Apply filters
       const filtered = hideSettled ? opportunities.filter(o => !isSettled(o)) : opportunities;
+      const today = filtered.filter(o => o.is_today);
+      const future = filtered.filter(o => !o.is_today);
       const settledCount = opportunities.filter(isSettled).length;
 
-      // Group by date
-      const todayOps = filtered.filter(o => o.is_today);
-      const futureOps = filtered.filter(o => !o.is_today);
+      let html = `<div class="text-[11px] text-term-muted mb-3">${filtered.length} of ${opportunities.length} markets (${settledCount} settled)</div>`;
 
-      let html = '';
-
-      // Filter bar
-      html += `<div class="flex items-center gap-3 mb-3 text-[11px]">
-        <span class="text-term-muted">${filtered.length} of ${opportunities.length} markets</span>
-        ${settledCount > 0 ? `<span class="text-term-muted">(${settledCount} settled at 100%)</span>` : ''}
-      </div>`;
-
-      if (todayOps.length) {
-        html += `<div class="text-term-cyan text-[11px] font-semibold uppercase tracking-wider mb-2">Today's Markets (${todayOps.length})</div>`;
+      if (today.length) {
+        html += `<div class="text-term-cyan text-[11px] font-semibold uppercase tracking-wider mb-2">Today (${today.length})</div>`;
         html += `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">`;
-        todayOps.forEach(o => { html += renderCard(o); });
+        today.forEach(o => { html += renderCard(o); });
         html += `</div>`;
       }
-
-      if (futureOps.length) {
-        html += `<div class="text-term-muted text-[11px] font-semibold uppercase tracking-wider mb-2 mt-6">Future Markets (${futureOps.length})</div>`;
+      if (future.length) {
+        html += `<div class="text-term-muted text-[11px] font-semibold uppercase tracking-wider mb-2 mt-6">Future (${future.length})</div>`;
         html += `<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">`;
-        futureOps.forEach(o => { html += renderCardCompact(o); });
+        future.forEach(o => { html += renderCardCompact(o); });
         html += `</div>`;
       }
-
-      if (!todayOps.length && !futureOps.length) {
-        html += `<div class="text-center py-12 text-term-muted">
-          <div class="text-lg mb-2">All ${settledCount} markets are settled at 100%</div>
-          <div class="text-[11px]">No actionable opportunities right now. Click "Show settled" to view them.</div>
-        </div>`;
+      if (!today.length && !future.length) {
+        html += `<div class="text-center py-12 text-term-muted text-lg">All markets settled. Click "Show settled" to view.</div>`;
       }
-
       container.innerHTML = html;
     }
 
     function renderCard(o) {
-      const unit = o.unit === 'fahrenheit' ? '°F' : '°C';
-      const w = o.weather;
-      const c = o.confidence;
-      const r = o.recommendation;
-      const g = o.guidance;
+      const u = o.unit === 'fahrenheit' ? '°F' : '°C';
+      const g = o.g;
+      if (!g) return '';
 
-      // ---- GUIDANCE PANEL (top priority) ----
-      let guidanceHTML = '';
-      if (g) {
-        // Best bet callout
-        let bestBetHTML = '';
-        if (g.best_bet) {
-          const bb = g.best_bet;
-          const ourPct = (bb.our_probability * 100).toFixed(0);
-          const mktPct = (bb.market_probability * 100).toFixed(0);
-          const edgePct = (bb.edge * 100).toFixed(0);
-          const betId = `bet-${o.city_key}-${bb.label}`.replace(/[^a-zA-Z0-9-]/g, '');
-          bestBetHTML = `
-            <div class="p-3 rounded border-2 border-term-green/40 bg-term-green/5 mb-3">
-              <div class="flex items-center justify-between mb-1">
-                <div>
-                  <span class="text-term-green font-bold text-lg font-display">BUY ${bb.label}</span>
-                  <span class="text-term-green/70 text-[11px] ml-2">+${edgePct}% edge</span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span class="text-term-muted text-[11px]">$</span>
-                  <input type="number" id="${betId}-amt" value="10" min="1" step="1"
-                    class="w-16 px-2 py-1 rounded bg-term-bg border border-term-green/30 text-term-bright text-[12px] text-right"
-                    style="font-family: inherit;">
-                  <button onclick='placeBetWithAmount("${betId}-amt", ${JSON.stringify({
-                    event_id: o.event_id, bracket_id: 0, token_id: "",
-                    price: bb.market_probability, city_key: o.city_key, date: o.date,
-                    bracket_label: bb.label, current_max_temp: w?.max_temp || 0,
-                    peak_hour: w?.peak_hour || 0, model_confidence: bb.our_probability,
-                    expected_value: bb.edge
-                  })})' class="btn px-4 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">Paper Bet ${mktPct}¢</button>
-                </div>
-              </div>
-              <div class="text-[11px] text-term-green/80">
-                Our model: ${ourPct}% likely | Market price: ${mktPct}¢ | Potential profit: +${edgePct}% per dollar
-              </div>
-            </div>`;
-        }
+      const actionColors = {
+        'BUY': 'border-term-green/50 bg-term-green/5',
+        'WATCH': 'border-term-amber/50 bg-term-amber/5',
+        'WAIT': 'border-term-border bg-term-surface',
+        'SKIP': 'border-term-red/30 bg-term-surface',
+        'NO_DATA': 'border-term-border bg-term-surface',
+      };
+      const actionTextColors = {
+        'BUY': 'text-term-green', 'WATCH': 'text-term-amber',
+        'WAIT': 'text-term-muted', 'SKIP': 'text-term-red', 'NO_DATA': 'text-term-muted',
+      };
+      const borderClass = actionColors[g.action] || 'border-term-border';
+      const textClass = actionTextColors[g.action] || 'text-term-muted';
 
-        // Historical context
-        let histHTML = `
-          <div class="flex items-center gap-4 text-[11px] mb-2 px-1 flex-wrap">
-            ${g.forecast_high != null ? `<div><span class="text-term-muted">WU Forecast:</span> <span class="text-term-green font-bold text-sm">${g.forecast_high}${unit}</span></div>` : ''}
-            <div><span class="text-term-muted">30d avg:</span> <span class="text-term-amber font-bold">${g.historical_avg_high}${unit}</span></div>
-            <div><span class="text-term-muted">range:</span> <span class="text-term-text">${g.historical_range}${unit}</span></div>
-            ${g.predicted_bracket ? `<div><span class="text-term-muted">most likely:</span> <span class="text-term-cyan font-bold">${g.predicted_bracket}</span></div>` : ''}
-          </div>`;
-
-        // Bracket edge table
-        let edgeTableHTML = '<div class="space-y-1 mb-3">';
-        g.bracket_edges.forEach(be => {
-          const ourPct = (be.our_prob * 100).toFixed(0);
-          const mktPct = (be.market_prob * 100).toFixed(0);
-          const edgePct = (be.edge * 100).toFixed(0);
-          const edgeSign = be.edge > 0 ? '+' : '';
-          const isBest = be.is_best;
-          const edgeColor = be.edge > 0.05 ? 'text-term-green' : be.edge < -0.05 ? 'text-term-red' : 'text-term-muted';
-          const rowBg = isBest ? 'bg-term-green/10 border-l-2 border-term-green pl-2' : '';
-          const maxProb = Math.max(...g.bracket_edges.map(b => b.our_prob), 0.01);
-          const barW = Math.max((be.our_prob / maxProb) * 100, 1);
-
-          edgeTableHTML += `
-            <div class="flex items-center gap-1 text-[11px] ${rowBg} py-0.5 rounded-sm">
-              <span class="w-24 text-term-bright truncate">${be.label}</span>
-              <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden relative">
-                <div class="h-full rounded-sm ${isBest ? 'bg-term-green/40' : 'bg-term-cyan/20'}" style="width:${barW}%"></div>
-                ${be.market_prob > 0 ? `<div class="absolute top-0 h-full border-r-2 border-term-amber/60" style="left:${Math.min(be.market_prob / maxProb * 100, 100)}%" title="market price"></div>` : ''}
-              </div>
-              <span class="w-10 text-right text-term-cyan">${ourPct}%</span>
-              <span class="w-8 text-right text-term-amber">${mktPct}¢</span>
-              <span class="w-10 text-right font-bold ${edgeColor}">${edgeSign}${edgePct}%</span>
-              ${isBest ? '<span class="text-[9px] text-term-green font-bold">BUY</span>' : ''}
-            </div>`;
-        });
-        edgeTableHTML += '</div>';
-
-        // Column headers for edge table
-        let edgeHeaderHTML = `
-          <div class="flex items-center gap-1 text-[10px] text-term-muted uppercase tracking-wider mb-1 px-1">
-            <span class="w-24">Bracket</span>
-            <span class="flex-1">Our Probability</span>
-            <span class="w-10 text-right">Ours</span>
-            <span class="w-8 text-right">Mkt</span>
-            <span class="w-10 text-right">Edge</span>
-            <span class="w-8"></span>
-          </div>`;
-
-        guidanceHTML = bestBetHTML + histHTML + edgeHeaderHTML + edgeTableHTML;
-      }
-
-      // ---- WEATHER DATA ----
-      let weatherSection = '';
-      if (w) {
-        weatherSection = `
-          <div class="flex items-baseline gap-3 mb-2">
-            <span class="text-2xl font-display font-bold text-term-amber">${w.max_temp}${unit}</span>
-            <span class="text-term-muted">peak at ${w.peak_hour}:00</span>
-            <span class="text-term-muted">(${w.observation_count} readings)</span>
+      // WU Status
+      let wuHTML = '';
+      if (g.peak != null) {
+        const trendIcon = g.trend < -0.5 ? '▼' : g.trend > 0.5 ? '▲' : '—';
+        const trendColor = g.trend < -0.5 ? 'text-term-cyan' : g.trend > 0.5 ? 'text-term-red' : 'text-term-muted';
+        wuHTML = `
+          <div class="mb-3">
+            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">WU Weather <span class="text-term-text">(${timeAgo(g.wu_at)})</span></div>
+            <div class="flex items-baseline gap-3">
+              <span class="text-2xl font-display font-bold text-term-amber">${g.peak}${u}</span>
+              <span class="text-term-muted">peak at ${g.peak_hour}:00</span>
+              <span class="${trendColor}">${trendIcon} ${g.trend > 0 ? '+' : ''}${g.trend}${u}</span>
+              <span class="text-term-muted">${g.obs_count} readings</span>
+            </div>
+            ${g.now_temp != null && g.now_temp != g.peak ? `<div class="text-[11px] text-term-muted mt-1">Now: ${g.now_temp}${u} at ${g.now_hour}:00 (${g.hours_since}h since peak)</div>` : ''}
           </div>`;
       } else {
-        weatherSection = `<div class="text-term-muted mb-2">No weather data scraped yet</div>`;
+        wuHTML = `<div class="text-term-muted mb-3 text-[11px]">No weather data scraped yet</div>`;
       }
 
-      // ---- CONFIDENCE ----
-      let confidenceSection = '';
-      if (c) {
-        const confPct = (c.confidence * 100).toFixed(0);
-        const confColor = c.confidence >= 0.85 ? 'text-term-green' : c.confidence >= 0.5 ? 'text-term-amber' : 'text-term-red';
-        confidenceSection = `
-          <div class="flex items-center gap-4 mb-2 text-[11px]">
-            <div><span class="text-term-muted">Peak passed:</span> <span class="${confColor} font-bold">${confPct}%</span></div>
-            <div class="text-term-muted">avg peak hour: ${c.mean_peak_hour}:00</div>
+      // Confidence bar
+      let confHTML = '';
+      if (g.conf > 0) {
+        const pct = (g.conf * 100).toFixed(0);
+        const barW = Math.min(g.conf * 100, 100);
+        const confColor = g.conf >= 0.85 ? 'bg-term-green' : g.conf >= 0.5 ? 'bg-term-amber' : 'bg-term-red';
+        const confText = g.conf >= 0.85 ? 'text-term-green' : g.conf >= 0.5 ? 'text-term-amber' : 'text-term-red';
+        confHTML = `
+          <div class="mb-3">
+            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Peak Confidence</div>
+            <div class="flex items-center gap-3">
+              <span class="${confText} font-bold text-lg font-display">${pct}%</span>
+              <div class="flex-1 h-2 bg-term-bg rounded-full overflow-hidden">
+                <div class="${confColor}/60 h-full rounded-full" style="width:${barW}%"></div>
+              </div>
+            </div>
+            ${g.conf_reason ? `<div class="text-[10px] text-term-muted mt-1">${g.conf_reason}</div>` : ''}
           </div>`;
       }
 
-      let historyBadge = '';
-      if (o.peak_info) {
-        historyBadge = o.peak_info.has_history
-          ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">${o.peak_info.historical_days}d</span>`
-          : `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">${o.peak_info.historical_days}d</span>`;
+      // Market + matching bracket
+      let marketHTML = '';
+      if (g.match_bracket) {
+        marketHTML = `
+          <div class="mb-3">
+            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Market <span class="text-term-text">(${timeAgo(g.mkt_at)})</span></div>
+            <div class="text-[11px]">
+              Matching bracket: <span class="text-term-cyan font-bold">${g.match_bracket}</span>
+              at <span class="text-term-amber font-bold">${(g.match_price * 100).toFixed(0)}¢</span>
+            </div>
+          </div>`;
       }
 
-      // ---- FALLBACK: plain brackets if no guidance ----
-      let fallbackBrackets = '';
-      if (!g && o.brackets.length) {
-        const maxPrice = Math.max(...o.brackets.map(b => b.yes_price || 0), 0.01);
-        fallbackBrackets = '<div class="space-y-1 mb-3">';
-        o.brackets.forEach(b => {
-          const pct = ((b.yes_price || 0) * 100).toFixed(0);
-          const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
-          fallbackBrackets += `
-            <div class="flex items-center gap-2 text-[11px] py-0.5 rounded-sm">
-              <span class="w-28 text-term-bright">${b.label}</span>
-              <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden">
-                <div class="h-full rounded-sm bg-term-muted/30" style="width:${barW}%"></div>
-              </div>
-              <span class="w-10 text-right text-term-muted">${pct}%</span>
-            </div>`;
-        });
-        fallbackBrackets += '</div>';
-      }
-
-      // Status badges and action buttons
-      let statusBadges = '';
-      if (!w) {
-        statusBadges += `<span class="px-2 py-0.5 rounded text-[10px] bg-term-cyan/10 text-term-cyan border border-term-cyan/20 inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-term-cyan spinner inline-block border border-term-cyan border-t-transparent"></span>Auto-scraping...</span> `;
-      }
-      if (o.auto_backfill_running || (!o.peak_info?.has_history && !o.peak_info)) {
-        statusBadges += `<span class="px-2 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber border border-term-amber/20 inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-term-amber spinner inline-block border border-term-amber border-t-transparent"></span>Auto-backfilling 30d...</span>`;
-      }
-
-      let actions = `
-        <div class="flex items-center gap-2 mt-3">
-          <button onclick="triggerScrape('${o.city_key}')" class="scrape-btn btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px]">
-            ${w ? 'Re-scrape' : 'Scrape Now'}
-          </button>
-          ${statusBadges}
+      // Recommendation
+      let recoHTML = `
+        <div class="p-3 rounded border-2 ${borderClass} mb-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="${textClass} font-bold text-lg font-display">${g.action}</span>
+              ${g.action === 'BUY' && g.match_bracket ? `<span class="text-term-green text-[11px] ml-2">${g.match_bracket} @ ${(g.match_price*100).toFixed(0)}¢ — +${(g.edge*100).toFixed(0)}% edge</span>` : ''}
+            </div>
+            ${g.action === 'BUY' ? `
+              <div class="flex items-center gap-2">
+                <span class="text-term-muted text-[11px]">$</span>
+                <input type="number" id="bet-amt-${o.city_key}" value="10" min="1" step="1" class="w-16 text-right">
+                <button onclick='placeBet(${JSON.stringify({
+                  event_id: o.event_id, bracket_id: g.match_id || 0, token_id: g.match_token || "",
+                  price: g.match_price, city_key: o.city_key, date: o.date,
+                  bracket_label: g.match_bracket, current_max_temp: g.peak || 0,
+                  peak_hour: g.peak_hour || 0, model_confidence: g.conf,
+                  expected_value: g.edge
+                })})' class="btn px-3 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">
+                  Bet ${(g.match_price*100).toFixed(0)}¢
+                </button>
+              </div>` : ''}
+          </div>
+          <div class="text-[10px] ${textClass}/80 mt-1">${g.reason}</div>
         </div>`;
 
+      // Brackets table (compact)
+      let bracketsHTML = '';
+      if (g.brackets && g.brackets.length) {
+        const maxPrice = Math.max(...g.brackets.map(b => b.yes_price || 0), 0.01);
+        bracketsHTML = '<div class="space-y-0.5">';
+        g.brackets.forEach(b => {
+          const pct = ((b.yes_price || 0) * 100).toFixed(0);
+          const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
+          const isMatch = g.match_bracket === b.label;
+          const hl = isMatch ? 'bg-term-cyan/15 border-l-2 border-term-cyan pl-2' : '';
+          bracketsHTML += `
+            <div class="flex items-center gap-1 text-[10px] ${hl} py-0.5 rounded-sm">
+              <span class="w-24 text-term-bright truncate">${b.label}</span>
+              <div class="flex-1 h-2 bg-term-bg rounded-sm overflow-hidden">
+                <div class="h-full rounded-sm ${isMatch ? 'bg-term-cyan/40' : 'bg-term-muted/20'}" style="width:${barW}%"></div>
+              </div>
+              <span class="w-8 text-right ${isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
+            </div>`;
+        });
+        bracketsHTML += '</div>';
+      }
+
       return `
-        <div id="card-${o.city_key}" class="card rounded-md relative overflow-hidden">
-          <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <div class="card rounded-md relative overflow-hidden">
+          <div class="px-4 py-2 border-b border-term-border flex items-center justify-between">
             <div class="flex items-center gap-2">
               <h3 class="font-display font-semibold text-term-bright text-sm">${o.city_name}</h3>
-              <span class="text-term-muted text-[11px]">${o.date}</span>
-              ${o.is_closed ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red border border-term-red/20">CLOSED</span>' : ''}
-              ${historyBadge}
+              <span class="text-term-muted text-[10px]">${o.date}</span>
+              ${o.hist_days > 0 ? `<span class="px-1 py-0.5 rounded text-[9px] bg-term-green/10 text-term-green">${o.hist_days}d</span>` : ''}
+              ${o.is_closed ? '<span class="px-1 py-0.5 rounded text-[9px] bg-term-red/10 text-term-red">CLOSED</span>' : ''}
             </div>
-            <div class="flex items-center gap-3">
-              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" rel="noopener" class="px-2 py-0.5 rounded text-[10px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20 transition-colors">Polymarket &nearr;</a>` : ''}
-              ${o.current_hour !== null ? `<span class="text-term-muted text-[11px]">${o.current_hour}:00 local</span>` : ''}
+            <div class="flex items-center gap-2">
+              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" class="px-2 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20">PM&nearr;</a>` : ''}
+              ${o.current_hour != null ? `<span class="text-term-muted text-[10px]">${o.current_hour}:00</span>` : ''}
             </div>
           </div>
           <div class="p-4">
-            ${weatherSection}
-            ${confidenceSection}
-            ${guidanceHTML || fallbackBrackets}
-            ${actions}
+            ${wuHTML}
+            ${confHTML}
+            ${marketHTML}
+            ${recoHTML}
+            ${bracketsHTML}
+            <div class="mt-3">
+              <button onclick="triggerScrape('${o.city_key}')" class="btn px-3 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Re-scrape</button>
+            </div>
           </div>
         </div>`;
     }
 
     function renderCardCompact(o) {
-      const topBracket = o.brackets.reduce((a, b) => (b.yes_price || 0) > (a.yes_price || 0) ? b : a, o.brackets[0] || {});
+      const g = o.g;
+      if (!g) return '';
+      const top = g.brackets ? g.brackets.reduce((a, b) => (b.yes_price || 0) > (a.yes_price || 0) ? b : a, g.brackets[0] || {}) : {};
       return `
         <div class="card rounded-md relative p-3">
           <div class="flex items-center justify-between mb-1">
             <span class="font-display font-semibold text-term-bright text-[12px]">${o.city_name}</span>
             <div class="flex items-center gap-2">
-              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" rel="noopener" class="text-[10px] text-term-purple hover:text-term-bright">PM&nearr;</a>` : ''}
+              ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" class="text-[9px] text-term-purple hover:text-term-bright">PM&nearr;</a>` : ''}
               <span class="text-term-muted text-[10px]">${o.date}</span>
             </div>
           </div>
-          <div class="text-[11px] text-term-muted">
-            ${topBracket.label ? `Leading: <span class="text-term-amber">${topBracket.label}</span> at ${((topBracket.yes_price || 0) * 100).toFixed(0)}%` : 'No brackets'}
+          <div class="text-[10px] text-term-muted">
+            ${top.label ? `Top: <span class="text-term-amber">${top.label}</span> @ ${((top.yes_price||0)*100).toFixed(0)}%` : ''}
           </div>
         </div>`;
     }
 
-    // ---- Helpers ----
-
-    function showStatus(msg, autoClearMs) {
+    function showStatus(msg, ms) {
       const bar = document.getElementById('status-bar');
-      const el = document.getElementById('status-msg');
+      document.getElementById('status-msg').textContent = msg;
       bar.classList.remove('hidden');
-      el.textContent = msg;
-      if (autoClearMs) setTimeout(() => bar.classList.add('hidden'), autoClearMs);
+      if (ms) setTimeout(() => bar.classList.add('hidden'), ms);
     }
 
-    // ---- Init ----
     loadOpportunities();
-
-    // Auto-reload: every 60s always (prices update), every 15s if scrapes running
-    setInterval(() => {
-      const hasRunning = opportunities.some(o => o.auto_backfill_running || !o.weather);
-      if (hasRunning) loadOpportunities();
-    }, 15000);
-    setInterval(() => loadOpportunities(), 60000);
+    setInterval(loadOpportunities, 60000);
   </script>
-
 </body>
 </html>

@@ -1,7 +1,7 @@
-"""Main orchestrator that ties all modules together.
+"""Main orchestrator: detects peak-passed conditions and places bets.
 
-Uses bracket edge analysis (historical peak distribution vs market prices)
-to find and place profitable paper bets automatically.
+Strategy: when the daily peak temperature has passed with high confidence,
+buy the matching bracket at a discount.
 """
 
 from __future__ import annotations
@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 from src.db.database import Database
 from src.db.repositories import MarketRepository, WeatherRepository
-from src.model.bracket_analyzer import compute_bracket_probabilities
+from src.model.bracket_analyzer import find_bracket_for_temp
+from src.model.features import compute_current_max
 from src.model.peak_predictor import PeakPredictor
 from src.polymarket.market_monitor import MarketMonitor
 from src.polymarket.trader import PolymarketTrader
@@ -132,29 +133,54 @@ class Orchestrator:
         await self._evaluate_city(city)
 
     async def _evaluate_city(self, city: CityConfig) -> None:
-        """Evaluate using bracket edge analysis: our historical probability vs market price."""
+        """Evaluate using peak-confidence: bet when peak has passed with high confidence."""
         today = today_in_tz(city.timezone)
+        current_hour = current_hour_in_tz(city.timezone)
         config = self._get_paper_config()
-        min_edge = config.get("min_edge", self._min_edge)
         bet_size = config.get("bet_size", self._bet_size)
         max_daily = config.get("max_daily_exposure", self._max_daily_exposure)
+        min_conf = config.get("min_edge", 0.85)  # reuse min_edge field as confidence threshold
 
         # Check daily exposure
         daily_spent = self._market_repo.get_daily_exposure(today)
         if daily_spent >= max_daily:
             return
 
-        # Get historical peak temps for this city (last 30 days)
-        hist_peaks = [
-            r["peak_temp"] for r in self._db.conn.execute(
-                "SELECT peak_temp FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
-                (city.key,),
-            ).fetchall()
-        ]
-        if len(hist_peaks) < 5:
+        # Need observations
+        observations = self._weather_repo.get_hourly_observations(city.key, today)
+        if not observations or len(observations) < 5:
             return
 
-        # Get today's events for this city
+        # Get current peak
+        max_temp, peak_hour = compute_current_max(observations)
+
+        # Need historical data for confidence model
+        hist_count = self._db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city.key,),
+        ).fetchone()["cnt"]
+        if hist_count < 5:
+            return
+
+        # Train and predict peak confidence
+        try:
+            self._peak_predictor.train(city.key, today)
+            prediction = self._peak_predictor.predict_confidence(
+                city.key, current_hour, max_temp, observations
+            )
+        except Exception as exc:
+            log.warning("predictor_error", city=city.key, error=str(exc))
+            return
+
+        confidence = prediction.confidence
+        log.info("peak_eval", city=city.key, hour=current_hour,
+                 peak=max_temp, conf=f"{confidence*100:.0f}%")
+
+        # Only bet when confidence is HIGH
+        if confidence < min_conf:
+            return
+
+        # Get today's events
         active_events = self._market_repo.get_active_events(today)
         city_events = [e for e in active_events if e["city_key"] == city.key]
 
@@ -169,33 +195,25 @@ class Orchestrator:
                     "yes_price": b["current_yes_price"] or 0,
                     "id": b["id"],
                     "clob_token_id_yes": b["clob_token_id_yes"],
-                    "tick_size": b.get("tick_size", "0.01"),
-                    "neg_risk": b["neg_risk"],
                 }
                 for b in brackets
             ]
 
-            # Compute bracket probabilities from historical data
-            edges = compute_bracket_probabilities(hist_peaks, bracket_list)
-
-            # Find the best edge that exceeds our threshold
-            buyable = [
-                e for e in edges
-                if e.edge >= min_edge and e.market_probability > 0 and e.market_probability < 0.95
-            ]
-            if not buyable:
+            # Find bracket matching current peak
+            matching = find_bracket_for_temp(max_temp, bracket_list)
+            if not matching:
                 continue
 
-            best = max(buyable, key=lambda e: e.edge)
+            price = matching.get("yes_price", 0) or 0
+            if price >= 0.97 or price <= 0:
+                continue  # already settled or no liquidity
 
-            # Find the bracket dict for this edge
-            bracket_dict = next(
-                (b for b in bracket_list if b["label"] == best.label), None
-            )
-            if not bracket_dict or not bracket_dict.get("clob_token_id_yes"):
-                continue
+            # Edge = confidence - market price
+            edge = confidence - price
+            if edge < 0.03:
+                continue  # no meaningful edge
 
-            # Check we haven't already bet on this event today
+            # Check no duplicate bet
             existing = self._db.conn.execute(
                 "SELECT id FROM bets WHERE event_id = ? AND date = ?",
                 (event["event_id"], today),
@@ -203,64 +221,50 @@ class Orchestrator:
             if existing:
                 continue
 
-            # Calculate position
-            price = best.market_probability
+            # Position sizing
             size = round(bet_size / price, 2) if price > 0 else 0
             cost = round(price * size, 2)
-
-            # Check balance
             remaining = max_daily - daily_spent
             if cost > remaining:
                 cost = remaining
                 size = round(cost / price, 2)
-
             if cost < 1.0:
                 continue
 
-            # Place the bet
-            token_id = bracket_dict["clob_token_id_yes"]
+            # Place bet
+            token_id = matching.get("clob_token_id_yes", "")
+            if not token_id:
+                continue
+
             order_result = self._trader.place_limit_buy(
                 token_id=token_id, price=price, size=size,
             )
 
-            # Get current peak for logging
-            peak = self._weather_repo.get_daily_peak(city.key, today)
-            peak_hour = peak["peak_hour"] if peak else 0
-            peak_temp = peak["peak_temp"] if peak else 0
-
             self._market_repo.record_bet(
                 event_id=event["event_id"],
-                bracket_id=bracket_dict["id"],
+                bracket_id=matching["id"],
                 city_key=city.key,
                 date=today,
-                bracket_label=best.label,
+                bracket_label=matching["label"],
                 side="BUY",
                 token_id=token_id,
                 price=price,
                 size=size,
                 cost=cost,
-                current_max_temp=peak_temp,
+                current_max_temp=max_temp,
                 peak_hour=peak_hour,
-                model_confidence=best.our_probability,
-                expected_value=best.edge,
+                model_confidence=confidence,
+                expected_value=edge,
                 order_id=order_result.order_id,
                 order_status=order_result.status,
                 is_paper=order_result.is_paper,
             )
 
             daily_spent += cost
-
-            log.info(
-                "AUTO_BET_PLACED",
-                city=city.key,
-                bracket=best.label,
-                our_prob=f"{best.our_probability*100:.0f}%",
-                market=f"{best.market_probability*100:.0f}¢",
-                edge=f"+{best.edge*100:.0f}%",
-                cost=f"${cost:.2f}",
-                order_id=order_result.order_id,
-                paper=order_result.is_paper,
-            )
+            log.info("AUTO_BET", city=city.key, bracket=matching["label"],
+                     conf=f"{confidence*100:.0f}%", price=f"{price*100:.0f}¢",
+                     edge=f"+{edge*100:.0f}%", cost=f"${cost:.2f}",
+                     paper=order_result.is_paper)
 
     @staticmethod
     def _is_wu_scrape_time() -> bool:

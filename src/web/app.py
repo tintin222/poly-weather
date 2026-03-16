@@ -337,26 +337,19 @@ async def opportunities_page(request: Request):
 
 @app.get("/api/opportunities")
 async def api_opportunities():
-    """Build enriched opportunity data for each active temperature event today."""
+    """Build peak-confidence based guidance for each active market."""
+    import time as _time
     from config import settings
-    from src.model.bracket_analyzer import generate_guidance
-    from src.model.features import compute_current_max
+    from src.model.bracket_analyzer import generate_peak_guidance
     from src.model.peak_predictor import PeakPredictor
-    from src.polymarket.gamma_api import parse_brackets, parse_city_and_date
-    from src.strategy.evaluator import EVEvaluator
     from src.utils.time_utils import current_hour_in_tz, today_in_tz
     from src.weather.cities import get_city
 
     db = get_db()
     weather_repo = WeatherRepository(db)
     market_repo = MarketRepository(db)
-    evaluator = EVEvaluator(
-        min_confidence=settings.min_confidence,
-        min_expected_value=settings.min_expected_value,
-    )
     predictor = PeakPredictor(db)
 
-    # Get all active events
     active_events = market_repo.get_active_events()
     opportunities = []
 
@@ -371,173 +364,114 @@ async def api_opportunities():
         current_hour = current_hour_in_tz(city.timezone)
         is_today = event_date == today
 
+        # Auto-actions
+        _auto_backfill_if_needed(city_key)
+        _auto_scrape_if_needed(city_key, city, event_date)
+
         # Get brackets
         brackets = market_repo.get_brackets_for_event(event["event_id"])
-        bracket_list = []
-        for b in brackets:
-            bracket_list.append({
+        bracket_list = [
+            {
                 "id": b["id"],
                 "label": b["bracket_label"],
                 "yes_price": b["current_yes_price"] or 0,
-                "no_price": b["current_no_price"] or 0,
                 "token_id_yes": b["clob_token_id_yes"],
-                "market_id": b["market_id"],
-                "condition_id": b["condition_id"],
-            })
-
-        # Auto-backfill if this city lacks historical data
-        backfill_job_id = _auto_backfill_if_needed(city_key)
-
-        # Auto-scrape today if we don't have observations yet
-        _auto_scrape_if_needed(city_key, city, event_date)
-
-        # Auto-scrape forecast if not cached yet
-        if is_today:
-            _auto_forecast_if_needed(city_key, city)
-
-        # Get weather observations
-        observations = weather_repo.get_hourly_observations(city_key, event_date)
-        weather_data = None
-        peak_info = None
-        confidence_info = None
-        recommendation = None
-        auto_backfill_running = backfill_job_id is not None
-
-        max_temp = None
-        if observations:
-            max_temp, peak_hour = compute_current_max(observations)
-            weather_data = {
-                "observation_count": len(observations),
-                "max_temp": max_temp,
-                "peak_hour": peak_hour,
-                "latest_hour": observations[-1]["hour"],
-                "latest_temp": observations[-1]["temperature"],
             }
+            for b in brackets
+        ]
 
-        # Get historical peaks (works even without today's observations)
-        hist_peaks_count = db.conn.execute(
+        # Get observations
+        observations = weather_repo.get_hourly_observations(city_key, event_date)
+
+        # WU scrape timestamp
+        wu_scraped_at = None
+        if observations:
+            row = db.conn.execute(
+                "SELECT MAX(scraped_at) as ts FROM hourly_observations WHERE city_key = ? AND date = ?",
+                (city_key, event_date),
+            ).fetchone()
+            wu_scraped_at = row["ts"] if row else None
+
+        # Peak confidence from PeakPredictor
+        peak_conf = None
+        peak_detail = None
+        hist_count = db.conn.execute(
             "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
             (city_key,),
         ).fetchone()["cnt"]
 
-        hist_peak_temps = [
-            r["peak_temp"] for r in db.conn.execute(
-                "SELECT peak_temp FROM daily_peaks WHERE city_key = ? ORDER BY date DESC LIMIT 30",
-                (city_key,),
-            ).fetchall()
-        ]
-
-        # Find matching bracket if we have today's temp
-        matching_label = None
-        matching_price = 0
-        if max_temp is not None:
-            matching = evaluator.find_matching_bracket(
-                max_temp, [dict(b) for b in brackets]
-            )
-            if matching:
-                matching_label = matching["bracket_label"]
-                matching_price = matching.get("current_yes_price", 0) or 0
-
-        # Confidence analysis (requires observations + history)
-        if observations and hist_peaks_count >= 5:
+        if observations and len(observations) >= 2 and hist_count >= 5:
             try:
+                from src.model.features import compute_current_max
+                max_temp, _ = compute_current_max(observations)
                 predictor.train(city_key, event_date, window_days=15, years_back=1)
                 prediction = predictor.predict_confidence(
                     city_key, current_hour, max_temp, observations
                 )
-                confidence_info = {
-                    "confidence": round(prediction.confidence, 4),
-                    "base_confidence": round(prediction.base_confidence, 4),
-                    "mean_peak_hour": round(prediction.mean_peak_hour, 1),
-                    "hours_past_mean": round(prediction.hours_past_mean, 1),
+                peak_conf = prediction.confidence
+                peak_detail = {
+                    "base_confidence": prediction.base_confidence,
+                    "mean_peak_hour": prediction.mean_peak_hour,
+                    "hours_past_mean": prediction.hours_past_mean,
                 }
             except Exception as exc:
                 log.warning("confidence_error", city=city_key, error=str(exc))
 
-        peak_info = {
-            "historical_days": hist_peaks_count,
-            "has_history": hist_peaks_count >= 5,
-            "matching_bracket": matching_label,
-            "matching_price": matching_price,
-        }
-
-        # Generate guidance — ALWAYS when we have brackets, regardless of WU data
-        # Check if we have a cached forecast for this city
-        forecast_high = _forecasts.get(city_key)
-
-        guidance_data = None
-        if hist_peak_temps and len(hist_peak_temps) >= 3:
-            # Have some history: use edge analysis
-            try:
-                guidance = generate_guidance(
-                    city_key=city_key,
-                    date=event_date,
-                    historical_peaks=hist_peak_temps,
-                    brackets=bracket_list,
-                    current_temp=max_temp,
-                    current_hour=current_hour if is_today else None,
-                    confidence_peak_passed=confidence_info["confidence"] if confidence_info else None,
-                    unit=city.unit if city else "celsius",
-                    forecast_high=forecast_high,
-                )
-                guidance_data = {
-                    "summary": guidance.summary,
-                    "forecast_high": forecast_high,
-                    "historical_avg_high": guidance.historical_avg_high,
-                    "historical_median_high": guidance.historical_median_high,
-                    "historical_range": f"{guidance.historical_min_high}-{guidance.historical_max_high}",
-                    "predicted_bracket": guidance.predicted_bracket,
-                    "best_bet": {
-                        "label": guidance.best_bet.label,
-                        "our_probability": guidance.best_bet.our_probability,
-                        "market_probability": guidance.best_bet.market_probability,
-                        "edge": guidance.best_bet.edge,
-                        "verdict": guidance.best_bet.verdict,
-                    } if guidance.best_bet else None,
-                    "bracket_edges": [
-                        {
-                            "label": be.label,
-                            "our_prob": be.our_probability,
-                            "market_prob": be.market_probability,
-                            "edge": be.edge,
-                            "verdict": be.verdict,
-                            "is_best": be.is_best_bet,
-                        }
-                        for be in guidance.brackets
-                    ],
-                }
-            except Exception as exc:
-                log.warning("guidance_error", city=city_key, error=str(exc))
+        # Generate peak-confidence based guidance
+        guidance = generate_peak_guidance(
+            city_key=city_key,
+            date=event_date,
+            brackets=bracket_list,
+            observations=observations if observations else None,
+            peak_confidence=peak_conf,
+            peak_confidence_detail=peak_detail,
+            current_hour=current_hour if is_today else None,
+            unit=city.unit if city else "celsius",
+            wu_scraped_at=wu_scraped_at,
+            market_polled_at=event["updated_at"],
+            min_confidence=settings.min_confidence,
+        )
 
         slug = event["slug"]
-        polymarket_url = f"https://polymarket.com/event/{slug}" if slug else None
-
         event_status = event["status"]
 
         opportunities.append({
-                "event_id": event["event_id"],
-                "city_key": city_key,
-                "city_name": city.display_name if city else city_key,
-                "date": event_date,
-                "title": event["title"],
-                "slug": slug,
-                "polymarket_url": polymarket_url,
-                "status": event_status,
-                "is_today": is_today,
-                "is_closed": event_status == "closed",
-                "current_hour": current_hour if is_today else None,
-                "timezone": city.timezone if city else None,
-                "unit": city.unit if city else "celsius",
-                "brackets": bracket_list,
-                "weather": weather_data,
-                "peak_info": peak_info,
-                "confidence": confidence_info,
-                "recommendation": recommendation,
-                "guidance": guidance_data,
-                "auto_backfill_running": auto_backfill_running,
-            })
+            "event_id": event["event_id"],
+            "city_key": city_key,
+            "city_name": city.display_name if city else city_key,
+            "date": event_date,
+            "slug": slug,
+            "polymarket_url": f"https://polymarket.com/event/{slug}" if slug else None,
+            "status": event_status,
+            "is_today": is_today,
+            "is_closed": event_status == "closed",
+            "current_hour": current_hour if is_today else None,
+            "unit": city.unit if city else "celsius",
+            "hist_days": hist_count,
+            "g": {
+                "action": guidance.action,
+                "reason": guidance.reason,
+                "peak": guidance.current_peak,
+                "peak_hour": guidance.peak_hour,
+                "now_temp": guidance.current_temp,
+                "now_hour": guidance.latest_hour,
+                "trend": guidance.trend,
+                "hours_since": guidance.hours_since_peak,
+                "obs_count": guidance.observation_count,
+                "conf": round(guidance.confidence, 4),
+                "conf_reason": guidance.confidence_reason,
+                "match_bracket": guidance.matching_bracket,
+                "match_price": guidance.matching_price,
+                "match_id": guidance.matching_bracket_id,
+                "match_token": guidance.matching_token_id,
+                "edge": round(guidance.edge, 4),
+                "gain_pct": guidance.potential_gain_pct,
+                "brackets": guidance.brackets,
+                "wu_at": guidance.wu_scraped_at,
+                "mkt_at": guidance.market_polled_at,
+            },
+        })
 
-    # Sort: today's events first, then by city
     opportunities.sort(key=lambda o: (not o["is_today"], o["date"], o["city_key"]))
     return opportunities
 

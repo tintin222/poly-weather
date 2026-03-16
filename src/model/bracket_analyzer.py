@@ -1,8 +1,7 @@
-"""Bracket probability analyzer.
+"""Peak-confidence based betting guidance.
 
-Uses historical peak temperatures to compute the probability that today's
-max will fall into each Polymarket bracket. Compares to market prices to
-find edges.
+Core strategy: detect when the daily peak temperature has passed,
+then buy the matching bracket at a discount before the market fully prices it in.
 """
 
 from __future__ import annotations
@@ -10,47 +9,53 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from src.model.features import compute_current_max, compute_temperature_trend, compute_hours_since_peak
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
 @dataclass
-class BracketEdge:
-    """Analysis of a single bracket's edge vs the market."""
-    label: str
-    our_probability: float      # our model's P(max lands in this bracket)
-    market_probability: float   # market's implied probability (= yes_price)
-    edge: float                 # our_prob - market_prob (positive = underpriced)
-    ev_per_dollar: float        # expected profit per $1 bet
-    verdict: str                # 'BUY', 'AVOID', 'NEUTRAL'
-    is_best_bet: bool = False
-
-
-@dataclass
-class BracketGuidance:
-    """Full guidance for a city's temperature market."""
+class PeakGuidance:
+    """Complete betting guidance for a city based on peak-confidence analysis."""
     city_key: str
     date: str
-    current_temp: float | None
-    current_hour: int | None
-    historical_avg_high: float
-    historical_median_high: float
-    historical_min_high: float
-    historical_max_high: float
-    predicted_bracket: str | None   # bracket most likely to win
-    confidence_peak_passed: float | None
-    brackets: list[BracketEdge] = field(default_factory=list)
-    best_bet: BracketEdge | None = None
-    summary: str = ""               # human-readable guidance
+
+    # Current WU situation
+    current_peak: float | None = None
+    peak_hour: int | None = None
+    current_temp: float | None = None
+    latest_hour: int | None = None
+    trend: float = 0.0              # positive=rising, negative=falling
+    hours_since_peak: int = 0
+    observation_count: int = 0
+
+    # Peak confidence
+    confidence: float = 0.0         # P(peak has passed) [0-1]
+    confidence_reason: str = ""     # human explanation
+
+    # Matching bracket
+    matching_bracket: str | None = None
+    matching_price: float = 0.0     # market price for matching bracket
+    matching_bracket_id: int | None = None
+    matching_token_id: str | None = None
+
+    # Recommendation
+    action: str = "WAIT"            # BUY, WAIT, SKIP, NO_DATA
+    reason: str = ""
+    edge: float = 0.0              # confidence - market_price
+    potential_gain_pct: float = 0.0
+
+    # All brackets for display
+    brackets: list[dict] = field(default_factory=list)
+
+    # Timestamps
+    wu_scraped_at: int | None = None
+    market_polled_at: int | None = None
 
 
 def parse_bracket_range(label: str) -> tuple[float | None, float | None]:
-    """Parse a bracket label into (low, high) bounds.
-
-    Returns (None, X) for "X or below", (X, None) for "X or higher",
-    (X, Y) for "X-Y", (X, X) for exact "X".
-    """
+    """Parse a bracket label into (low, high) bounds."""
     label_clean = label.replace("°C", "").replace("°F", "").strip()
 
     if "or below" in label.lower():
@@ -76,239 +81,169 @@ def parse_bracket_range(label: str) -> tuple[float | None, float | None]:
 
 
 def temp_in_bracket(temp: float, low: float | None, high: float | None) -> bool:
-    """Check if a temperature falls within a bracket range.
-
-    Uses rounding to match how Polymarket resolves:
-    - "14°C" means the daily high rounds to 14 (13.5-14.4°C)
-    - "6°C or below" means round(high) <= 6
-    - "16°C or higher" means round(high) >= 16
-    - "42-43°F" means round(high) is 42 or 43
-    """
+    """Check if a temperature falls within a bracket range (using rounding)."""
     rounded = round(temp)
     if low is None and high is not None:
         return rounded <= round(high)
     if high is None and low is not None:
         return rounded >= round(low)
     if low is not None and high is not None:
-        if low == high:  # single value bracket like "14°C"
+        if low == high:
             return rounded == round(low)
-        else:  # range bracket like "42-43°F"
+        else:
             return round(low) <= rounded <= round(high)
     return False
 
 
-def _forecast_probability(
-    forecast_high: float,
-    low: float | None,
-    high: float | None,
-    std: float = 1.5,
-) -> float:
-    """Compute probability of a bracket given a forecast high.
-
-    Models forecast error as a normal distribution centered at forecast_high
-    with standard deviation `std` (default 1.5°C).
-    """
-    from scipy.stats import norm
-
-    # For "X or below"
-    if low is None and high is not None:
-        return float(norm.cdf(high + 0.5, loc=forecast_high, scale=std))
-
-    # For "X or higher"
-    if high is None and low is not None:
-        return float(1 - norm.cdf(low - 0.5, loc=forecast_high, scale=std))
-
-    if low is not None and high is not None:
-        if low == high:
-            # Single bracket "14°C" → range [13.5, 14.5)
-            return float(
-                norm.cdf(low + 0.5, loc=forecast_high, scale=std)
-                - norm.cdf(low - 0.5, loc=forecast_high, scale=std)
-            )
-        else:
-            # Range bracket "42-43°F" → range [42, 44)
-            return float(
-                norm.cdf(high + 0.5, loc=forecast_high, scale=std)
-                - norm.cdf(low - 0.5, loc=forecast_high, scale=std)
-            )
-
-    return 0.0
-
-
-def compute_bracket_probabilities(
-    historical_peaks: list[float],
-    brackets: list[dict],
-    forecast_high: float | None = None,
-) -> list[BracketEdge]:
-    """Compute probability for each bracket.
-
-    Uses a blend of:
-    - WU forecast high (if available): 70% weight, modeled as normal distribution
-    - Historical peak distribution: 30% weight (or 100% if no forecast)
-    """
-    if not brackets:
-        return []
-
-    has_history = bool(historical_peaks) and len(historical_peaks) >= 3
-    has_forecast = forecast_high is not None
-    n = len(historical_peaks) if has_history else 0
-
-    # Weights
-    forecast_weight = 0.7 if has_forecast and has_history else (1.0 if has_forecast else 0.0)
-    history_weight = 1.0 - forecast_weight
-
-    results = []
-
+def find_bracket_for_temp(temp: float, brackets: list[dict]) -> dict | None:
+    """Find the bracket that matches a temperature value."""
     for b in brackets:
         label = b.get("label") or b.get("bracket_label", "")
-        market_price = b.get("yes_price") or b.get("current_yes_price") or 0
         low, high = parse_bracket_range(label)
-
-        # Historical probability
-        hist_prob = 0.0
-        if has_history:
-            count = sum(1 for t in historical_peaks if temp_in_bracket(t, low, high))
-            hist_prob = count / n
-
-        # Forecast probability
-        fc_prob = 0.0
-        if has_forecast:
-            fc_prob = _forecast_probability(forecast_high, low, high)
-
-        # Blend
-        our_prob = forecast_weight * fc_prob + history_weight * hist_prob
-
-        edge = our_prob - market_price
-
-        # BUY only if there's real market liquidity (price >= 1¢)
-        if market_price >= 0.01 and edge > 0.05 and our_prob >= 0.05:
-            verdict = "BUY"
-        elif market_price >= 0.01 and edge < -0.10:
-            verdict = "AVOID"
-        elif market_price < 0.01 and our_prob >= 0.10:
-            verdict = "CHEAP"  # our model says likely but no/thin market
-        else:
-            verdict = "NEUTRAL"
-
-        results.append(BracketEdge(
-            label=label,
-            our_probability=round(our_prob, 4),
-            market_probability=round(market_price, 4),
-            edge=round(edge, 4),
-            ev_per_dollar=round(edge, 4),
-            verdict=verdict,
-        ))
-
-    # Best bet: must have real market liquidity (>= 1¢) to actually buy
-    buyable = [b for b in results if b.verdict == "BUY" and b.market_probability >= 0.01]
-    if buyable:
-        best = max(buyable, key=lambda b: b.edge)
-        best.is_best_bet = True
-
-    return results
+        if temp_in_bracket(temp, low, high):
+            return b
+    return None
 
 
-def generate_guidance(
+def generate_peak_guidance(
     city_key: str,
     date: str,
-    historical_peaks: list[float],
     brackets: list[dict],
-    current_temp: float | None = None,
-    current_hour: int | None = None,
-    confidence_peak_passed: float | None = None,
+    observations: list | None,
+    peak_confidence: float | None,
+    peak_confidence_detail: dict | None,
+    current_hour: int | None,
     unit: str = "celsius",
-    forecast_high: float | None = None,
-) -> BracketGuidance:
-    """Generate full betting guidance for a city.
+    wu_scraped_at: int | None = None,
+    market_polled_at: int | None = None,
+    min_confidence: float = 0.85,
+) -> PeakGuidance:
+    """Generate betting guidance based on peak-confidence analysis.
 
-    Args:
-        city_key: City identifier.
-        date: Event date YYYY-MM-DD.
-        historical_peaks: List of daily max temps from last 30 days.
-        brackets: List of bracket dicts with label and yes_price.
-        current_temp: Current observed max temp today (None if not scraped).
-        current_hour: Current local hour.
-        confidence_peak_passed: Model confidence that peak has occurred.
-        unit: Temperature unit for display.
+    Core logic:
+    1. What's the current peak temperature from WU?
+    2. Is the temperature declining?
+    3. How confident are we the peak won't go higher?
+    4. What bracket does the current peak match?
+    5. Is there an edge (confidence > market price)?
     """
-    import numpy as np
-
     unit_symbol = "°F" if unit == "fahrenheit" else "°C"
 
-    # Historical stats
-    if historical_peaks:
-        avg_high = float(np.mean(historical_peaks))
-        median_high = float(np.median(historical_peaks))
-        min_high = float(np.min(historical_peaks))
-        max_high = float(np.max(historical_peaks))
-    else:
-        avg_high = median_high = min_high = max_high = 0.0
-
-    # Compute bracket probabilities
-    bracket_edges = compute_bracket_probabilities(historical_peaks, brackets, forecast_high=forecast_high)
-
-    # Find predicted bracket (highest our_probability)
-    predicted_bracket = None
-    if bracket_edges:
-        best_prob = max(bracket_edges, key=lambda b: b.our_probability)
-        if best_prob.our_probability > 0:
-            predicted_bracket = best_prob.label
-
-    # Find best bet
-    best_bet = next((b for b in bracket_edges if b.is_best_bet), None)
-
-    # Build summary
-    summary_parts = []
-
-    if forecast_high is not None:
-        summary_parts.append(f"WU Forecast high: {forecast_high:.0f}{unit_symbol}")
-
-    if historical_peaks:
-        summary_parts.append(
-            f"30d avg: {avg_high:.0f}{unit_symbol}, "
-            f"range {min_high:.0f}-{max_high:.0f}{unit_symbol}"
-        )
-
-    if current_temp is not None and current_hour is not None:
-        summary_parts.append(f"Current peak: {current_temp}{unit_symbol} at {current_hour}:00")
-
-    if confidence_peak_passed is not None:
-        pct = confidence_peak_passed * 100
-        if pct >= 85:
-            summary_parts.append(f"Peak likely passed ({pct:.0f}% confidence)")
-        elif pct >= 50:
-            summary_parts.append(f"Peak may have passed ({pct:.0f}% confidence)")
-        else:
-            summary_parts.append(f"Peak likely NOT yet reached ({pct:.0f}% confidence)")
-
-    if best_bet:
-        profit_pct = best_bet.edge * 100
-        buy_price = best_bet.market_probability * 100
-        our_pct = best_bet.our_probability * 100
-        summary_parts.append(
-            f"BEST BET: {best_bet.label} — we give {our_pct:.0f}%, "
-            f"market says {buy_price:.0f}¢, edge +{profit_pct:.0f}%"
-        )
-    elif bracket_edges:
-        # Check if market is fairly priced
-        max_edge = max(b.edge for b in bracket_edges) if bracket_edges else 0
-        if max_edge <= 0.03:
-            summary_parts.append("No edge found — market is fairly priced or overpriced vs our model")
-
-    summary = " | ".join(summary_parts)
-
-    return BracketGuidance(
+    guidance = PeakGuidance(
         city_key=city_key,
         date=date,
-        current_temp=current_temp,
-        current_hour=current_hour,
-        historical_avg_high=round(avg_high, 1),
-        historical_median_high=round(median_high, 1),
-        historical_min_high=round(min_high, 1),
-        historical_max_high=round(max_high, 1),
-        predicted_bracket=predicted_bracket,
-        confidence_peak_passed=confidence_peak_passed,
-        brackets=bracket_edges,
-        best_bet=best_bet,
-        summary=summary,
+        wu_scraped_at=wu_scraped_at,
+        market_polled_at=market_polled_at,
+        brackets=[
+            {
+                "label": b.get("label") or b.get("bracket_label", ""),
+                "yes_price": b.get("yes_price") or b.get("current_yes_price") or 0,
+                "id": b.get("id"),
+                "token_id_yes": b.get("token_id_yes") or b.get("clob_token_id_yes"),
+            }
+            for b in brackets
+        ],
     )
+
+    # No observations yet
+    if not observations or len(observations) < 2:
+        guidance.action = "NO_DATA"
+        guidance.reason = "No weather data scraped yet. Waiting for WU scrape..."
+        return guidance
+
+    # Current situation from observations
+    max_temp, peak_hour = compute_current_max(observations)
+    trend = compute_temperature_trend(observations, window=3)
+    hours_since = compute_hours_since_peak(observations)
+
+    guidance.current_peak = max_temp
+    guidance.peak_hour = peak_hour
+    guidance.current_temp = observations[-1]["temperature"]
+    guidance.latest_hour = observations[-1]["hour"]
+    guidance.trend = round(trend, 1)
+    guidance.hours_since_peak = hours_since
+    guidance.observation_count = len(observations)
+
+    # Peak confidence
+    if peak_confidence is not None:
+        guidance.confidence = peak_confidence
+        detail = peak_confidence_detail or {}
+
+        # Build explanation
+        reasons = []
+        base = detail.get("base_confidence", 0)
+        mean_h = detail.get("mean_peak_hour", 0)
+        hours_past = detail.get("hours_past_mean", 0)
+
+        if base > 0:
+            reasons.append(f"Historical: {base*100:.0f}% of days peaked by {current_hour}:00")
+        if trend < -0.5:
+            reasons.append(f"Temp dropping ({trend:+.1f}{unit_symbol} in last readings)")
+        elif trend > 0.5:
+            reasons.append(f"Temp still rising ({trend:+.1f}{unit_symbol})")
+        if hours_past > 0:
+            reasons.append(f"{hours_past:.1f}h past avg peak time ({mean_h:.0f}:00)")
+        elif hours_past < -1:
+            reasons.append(f"{abs(hours_past):.1f}h before avg peak time ({mean_h:.0f}:00)")
+
+        guidance.confidence_reason = " | ".join(reasons)
+    else:
+        guidance.action = "WAIT"
+        guidance.reason = "Need historical data to calculate peak confidence. Backfilling..."
+        return guidance
+
+    # Find matching bracket
+    matching = find_bracket_for_temp(max_temp, brackets)
+    if matching:
+        label = matching.get("label") or matching.get("bracket_label", "")
+        price = matching.get("yes_price") or matching.get("current_yes_price") or 0
+        guidance.matching_bracket = label
+        guidance.matching_price = price
+        guidance.matching_bracket_id = matching.get("id")
+        guidance.matching_token_id = matching.get("token_id_yes") or matching.get("clob_token_id_yes")
+    else:
+        guidance.action = "WAIT"
+        guidance.reason = f"Current peak {max_temp}{unit_symbol} doesn't match any bracket."
+        return guidance
+
+    # Decision logic
+    conf = guidance.confidence
+    price = guidance.matching_price
+
+    if conf < 0.50:
+        guidance.action = "WAIT"
+        guidance.reason = (
+            f"Too early — only {conf*100:.0f}% confident peak has passed. "
+            f"Peak {max_temp}{unit_symbol} at {peak_hour}:00, temp {'still rising' if trend > 0 else 'may still change'}."
+        )
+    elif conf < min_confidence:
+        guidance.action = "WATCH"
+        guidance.reason = (
+            f"Peak may have passed ({conf*100:.0f}% confident) but below {min_confidence*100:.0f}% threshold. "
+            f"Peak {max_temp}{unit_symbol} at {peak_hour}:00. Waiting..."
+        )
+    elif price >= 0.97:
+        guidance.action = "SKIP"
+        guidance.reason = (
+            f"Peak passed ({conf*100:.0f}% confident) but {guidance.matching_bracket} already at "
+            f"{price*100:.0f}¢ — no profit margin left."
+        )
+    elif price >= conf:
+        guidance.action = "SKIP"
+        guidance.edge = conf - price
+        guidance.reason = (
+            f"No edge: {conf*100:.0f}% confident but {guidance.matching_bracket} at {price*100:.0f}¢. "
+            f"Need price below {conf*100:.0f}¢ for a profitable bet."
+        )
+    else:
+        # We have an edge!
+        guidance.action = "BUY"
+        guidance.edge = conf - price
+        guidance.potential_gain_pct = round((1.0 / price - 1.0) * 100, 1) if price > 0 else 0
+        guidance.reason = (
+            f"Peak {max_temp}{unit_symbol} at {peak_hour}:00, declining for {hours_since}h. "
+            f"{conf*100:.0f}% confident → buy {guidance.matching_bracket} at {price*100:.0f}¢ "
+            f"(+{guidance.edge*100:.0f}% edge, potential +{guidance.potential_gain_pct:.0f}% gain)."
+        )
+
+    return guidance

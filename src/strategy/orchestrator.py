@@ -11,9 +11,10 @@ import time
 from typing import TYPE_CHECKING
 
 from src.db.database import Database
-from src.db.repositories import MarketRepository, WeatherRepository
+from src.db.repositories import JobRunRepository, MarketRepository, WeatherRepository
 from src.model.bracket_analyzer import find_bracket_for_temp
 from src.model.features import compute_current_max
+from src.model.ml_trainer import MLTrainer
 from src.model.peak_predictor import PeakPredictor
 from src.polymarket.market_monitor import MarketMonitor
 from src.polymarket.trader import PolymarketTrader
@@ -39,10 +40,12 @@ class Orchestrator:
 
         self._weather_repo = WeatherRepository(self._db)
         self._market_repo = MarketRepository(self._db)
+        self._job_repo = JobRunRepository(self._db)
 
         self._market_monitor = MarketMonitor(self._market_repo)
         self._trader = PolymarketTrader(settings)
         self._peak_predictor = PeakPredictor(self._db)
+        self._ml_trainer = MLTrainer(self._db)
 
         # Load paper account settings
         self._bet_size = settings.bet_size
@@ -78,21 +81,37 @@ class Orchestrator:
     async def run_once(self) -> None:
         """Run a single evaluation cycle."""
         log.info("orchestrator_cycle_start")
-        await self._market_monitor.poll_all()
-
-        cities_today = self._get_todays_cities()
-        log.info("cities_to_evaluate", count=len(cities_today))
-
-        scraper = WUScraper(headless=True)
-        await scraper.start()
+        cycle_run_id = self._job_repo.create_run("orchestrator_cycle")
         try:
-            for city in cities_today:
-                try:
-                    await self._scrape_and_evaluate(city, scraper)
-                except Exception as exc:
-                    log.error("city_error", city=city.key, error=str(exc))
-        finally:
-            await scraper.stop()
+            poll_run_id = self._job_repo.create_run("market_poll")
+            try:
+                count = await self._market_monitor.poll_all()
+                self._job_repo.finish_run(poll_run_id, "success", records_processed=count)
+            except Exception as exc:
+                self._job_repo.finish_run(poll_run_id, "error", error_message=str(exc))
+                raise
+
+            cities_today = self._get_todays_cities()
+            log.info("cities_to_evaluate", count=len(cities_today))
+
+            scraper = WUScraper(headless=True)
+            await scraper.start()
+            try:
+                for city in cities_today:
+                    scrape_run_id = self._job_repo.create_run("scrape", city.key)
+                    try:
+                        await self._scrape_and_evaluate(city, scraper)
+                        self._job_repo.finish_run(scrape_run_id, "success")
+                    except Exception as exc:
+                        self._job_repo.finish_run(scrape_run_id, "error", error_message=str(exc))
+                        log.error("city_error", city=city.key, error=str(exc))
+            finally:
+                await scraper.stop()
+
+            self._job_repo.finish_run(cycle_run_id, "success", records_processed=len(cities_today))
+        except Exception as exc:
+            self._job_repo.finish_run(cycle_run_id, "error", error_message=str(exc))
+            raise
 
         log.info("orchestrator_cycle_complete")
 
@@ -173,8 +192,40 @@ class Orchestrator:
             return
 
         confidence = prediction.confidence
-        log.info("peak_eval", city=city.key, hour=current_hour,
-                 peak=max_temp, conf=f"{confidence*100:.0f}%")
+
+        # --- ML classifier signal: P(current_hour is the peak hour) ---
+        import datetime as _dt
+        _today_dt = _dt.date.today()
+        _doy = _today_dt.timetuple().tm_yday
+        # 7-day rolling peak hour from DB
+        _past = self._db.conn.execute(
+            """SELECT peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0
+               ORDER BY date DESC LIMIT 7""",
+            (city.key,),
+        ).fetchall()
+        _rolling = float(sum(r["peak_hour"] for r in _past) / len(_past)) if _past else 14.0
+        _obs_dicts = [dict(o) if not isinstance(o, dict) else o for o in observations]
+        ml_prob = self._ml_trainer.predict_is_peak(
+            city_key=city.key,
+            current_hour=current_hour,
+            today_obs=_obs_dicts,
+            rolling_peak_hour=_rolling,
+            day_of_year=_doy,
+        )
+
+        # Combined confidence: blend CDF (60%) and ML peak probability (40%)
+        # ML probability baseline is 1/15 ≈ 6.7%; rescale to 0-1 relative to max ~0.95
+        if ml_prob is not None:
+            # Rescale ML probability: 0.067 (random) → 0, 0.95 (strong) → 1
+            ml_scaled = min(max((ml_prob - 0.067) / (0.95 - 0.067), 0.0), 1.0)
+            combined_conf = 0.6 * confidence + 0.4 * ml_scaled
+            log.info("peak_eval", city=city.key, hour=current_hour,
+                     peak=max_temp, cdf_conf=f"{confidence*100:.0f}%",
+                     ml_prob=f"{ml_prob*100:.1f}%", combined=f"{combined_conf*100:.0f}%")
+            confidence = combined_conf
+        else:
+            log.info("peak_eval", city=city.key, hour=current_hour,
+                     peak=max_temp, conf=f"{confidence*100:.0f}%", ml="no_model")
 
         # Only bet when confidence is HIGH
         if confidence < min_conf:
@@ -290,7 +341,13 @@ class Orchestrator:
                 current_minute = datetime.datetime.now().minute
 
                 if now - last_market_poll >= market_interval_minutes * 60:
-                    await self._market_monitor.poll_all()
+                    poll_run_id = self._job_repo.create_run("market_poll")
+                    try:
+                        count = await self._market_monitor.poll_all()
+                        self._job_repo.finish_run(poll_run_id, "success", records_processed=count)
+                    except Exception as exc:
+                        self._job_repo.finish_run(poll_run_id, "error", error_message=str(exc))
+                        raise
                     last_market_poll = now
 
                 if self._is_wu_scrape_time() and current_minute != last_weather_minute:
@@ -302,9 +359,12 @@ class Orchestrator:
                         await scraper.start()
                         try:
                             for city in cities_today:
+                                scrape_run_id = self._job_repo.create_run("scrape", city.key)
                                 try:
                                     await self._scrape_and_evaluate(city, scraper)
+                                    self._job_repo.finish_run(scrape_run_id, "success")
                                 except Exception as exc:
+                                    self._job_repo.finish_run(scrape_run_id, "error", error_message=str(exc))
                                     log.error("evaluation_error", city=city.key, error=str(exc))
                         finally:
                             await scraper.stop()

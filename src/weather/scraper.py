@@ -17,20 +17,17 @@ BASE_URL = "https://www.wunderground.com/history/daily"
 FORECAST_URL = "https://www.wunderground.com/hourly"
 
 
-def _parse_time_to_hour(time_str: str) -> int:
-    """Convert 12h time string like '1:30 PM' to 24h hour integer."""
+def _parse_time(time_str: str) -> tuple[int, str]:
+    """Convert 12h time string like '1:30 PM' to (hour_int, '13:30') 24h format."""
     time_str = time_str.strip()
-    try:
-        dt = datetime.strptime(time_str, "%I:%M %p")
-        return dt.hour
-    except ValueError:
-        # Try without minutes
+    for fmt in ("%I:%M %p", "%I %p"):
         try:
-            dt = datetime.strptime(time_str, "%I %p")
-            return dt.hour
+            dt = datetime.strptime(time_str, fmt)
+            return dt.hour, dt.strftime("%H:%M")
         except ValueError:
-            log.warning("unparseable_time", time_str=time_str)
-            return 0
+            continue
+    log.warning("unparseable_time", time_str=time_str)
+    return 0, "00:00"
 
 
 def _strip_numeric(value: str) -> float | None:
@@ -416,7 +413,7 @@ class WUScraper:
         if temp is None:
             return None
 
-        hour = _parse_time_to_hour(time_str)
+        hour, time_24h = _parse_time(time_str)
 
         # Parse optional fields
         dew_point = _strip_numeric(get_cell("dew_point"))
@@ -444,7 +441,7 @@ class WUScraper:
             condition = None
 
         return HourlyObservation(
-            time_local=time_str,
+            time_local=time_24h,
             hour=hour,
             temperature=temp,
             dew_point=dew_point,

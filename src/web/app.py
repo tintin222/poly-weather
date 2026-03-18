@@ -12,7 +12,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from src.db.database import Database
-from src.db.repositories import MarketRepository, WeatherRepository
+from src.db.repositories import JobRunRepository, MarketRepository, ModelResultRepository, WeatherRepository
+from src.model.ml_trainer import MLTrainer
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -32,6 +33,20 @@ _backfill_started: set[str] = set()
 # Separate semaphores so scrapes aren't blocked by backfills
 _scrape_semaphore = asyncio.Semaphore(3)   # for today's scrapes (fast, ~5s each)
 _backfill_semaphore = asyncio.Semaphore(1)  # for 30-day backfills (slow, ~2min each)
+
+# ML trainer singleton (caches trained models in-memory)
+_ml_trainer: MLTrainer | None = None
+
+
+def get_ml_trainer() -> MLTrainer:
+    global _ml_trainer
+    if _ml_trainer is None:
+        _ml_trainer = MLTrainer(get_db())
+    return _ml_trainer
+
+
+def get_job_repo() -> JobRunRepository:
+    return JobRunRepository(get_db())
 
 
 def get_db() -> Database:
@@ -481,15 +496,33 @@ async def api_opportunities():
 # Scrape / backfill / refresh actions
 # ---------------------------------------------------------------------------
 
+@app.post("/api/resolve-bets")
+async def api_resolve_bets():
+    """Manually trigger bet resolution for all closed markets."""
+    db = get_db()
+    market_repo = MarketRepository(db)
+    from src.polymarket.market_monitor import MarketMonitor
+    monitor = MarketMonitor(market_repo)
+    resolved = monitor._resolve_settled_bets()
+    return {"status": "ok", "resolved": resolved}
+
+
 @app.post("/api/refresh-markets")
 async def api_refresh_markets():
     """Re-poll Polymarket for latest events and prices."""
     db = get_db()
     market_repo = MarketRepository(db)
+    job_repo = JobRunRepository(db)
+    run_id = job_repo.create_run("market_poll")
 
     from src.polymarket.market_monitor import MarketMonitor
     monitor = MarketMonitor(market_repo)
-    count = await monitor.poll_all()
+    try:
+        count = await monitor.poll_all()
+        job_repo.finish_run(run_id, "success", records_processed=count)
+    except Exception as exc:
+        job_repo.finish_run(run_id, "error", error_message=str(exc))
+        raise
     return {"status": "ok", "events_processed": count}
 
 
@@ -517,7 +550,9 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
         log.info("scrape_job_acquired_lock", job_id=job_id, city=city.key)
         db = get_db()
         repo = WeatherRepository(db)
+        job_repo = JobRunRepository(db)
         scrape_date = date or today_in_tz(city.timezone)
+        run_id = job_repo.create_run("scrape", city.key)
 
         try:
             scraper = WUScraper(headless=True)
@@ -537,16 +572,19 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
                     peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
                     observation_count=len(observations),
                 )
+                job_repo.finish_run(run_id, "success", records_processed=count)
                 _jobs[job_id] = {
                     "status": "complete", "type": "scrape", "city": city.key,
                     "date": scrape_date, "observations": count,
                     "peak_temp": peak_obs.temperature, "peak_hour": peak_obs.hour,
                 }
             else:
+                job_repo.finish_run(run_id, "success", records_processed=0)
                 _jobs[job_id] = {"status": "complete", "type": "scrape", "city": city.key, "observations": 0}
 
         except Exception as exc:
             log.error("scrape_job_failed", job_id=job_id, error=str(exc))
+            job_repo.finish_run(run_id, "error", error_message=str(exc))
             _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
 
 
@@ -577,6 +615,8 @@ async def _run_backfill_job(job_id: str, city, days: int):
         log.info("backfill_job_acquired_lock", job_id=job_id, city=city.key)
         db = get_db()
         repo = WeatherRepository(db)
+        job_repo = JobRunRepository(db)
+        run_id = job_repo.create_run("backfill", city.key, metadata={"days": days})
 
         try:
             scraper = WUScraper(headless=True)
@@ -592,12 +632,14 @@ async def _run_backfill_job(job_id: str, city, days: int):
                 (city.key,),
             ).fetchone()["cnt"]
 
+            job_repo.finish_run(run_id, "success", records_processed=total)
             _jobs[job_id] = {
                 "status": "complete", "type": "backfill", "city": city.key,
                 "days": days, "total_peaks": total,
             }
         except Exception as exc:
             log.error("backfill_job_failed", job_id=job_id, error=str(exc))
+            job_repo.finish_run(run_id, "error", error_message=str(exc))
             _jobs[job_id] = {"status": "error", "type": "backfill", "error": str(exc)}
 
 
@@ -836,6 +878,228 @@ async def api_reset_paper_account():
 async def config_page(request: Request):
     """Config page for paper trading settings."""
     return templates.TemplateResponse("config.html", {"request": request})
+
+
+# ---------------------------------------------------------------------------
+# City detail page
+# ---------------------------------------------------------------------------
+
+@app.get("/city/{city_key}", response_class=HTMLResponse)
+async def city_detail_page(city_key: str, request: Request):
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    return templates.TemplateResponse("city.html", {
+        "request": request,
+        "city_key": city_key,
+        "city": city,
+    })
+
+
+@app.get("/api/city/{city_key}/hourly")
+async def api_city_hourly(
+    city_key: str,
+    page: int = 1,
+    page_size: int = 50,
+    date_from: str | None = None,
+    date_to: str | None = None,
+):
+    db = get_db()
+    repo = WeatherRepository(db)
+    rows, total = repo.get_hourly_paginated(city_key, page, page_size, date_from, date_to)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "rows": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+@app.get("/api/city/{city_key}/daily-peaks")
+async def api_city_daily_peaks(city_key: str, limit: int = 30):
+    db = get_db()
+    repo = WeatherRepository(db)
+    rows = repo.get_recent_daily_peaks(city_key, limit)
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/city/{city_key}/stats")
+async def api_city_stats(city_key: str):
+    db = get_db()
+    repo = WeatherRepository(db)
+    return repo.get_city_stats(city_key)
+
+
+@app.get("/api/city/{city_key}/ml-results")
+async def api_city_ml_results(city_key: str):
+    db = get_db()
+    repo = ModelResultRepository(db)
+    results = repo.get_latest_results(city_key)
+    # Also check in-memory cache
+    trainer = get_ml_trainer()
+    cached = trainer.get_cached(city_key)
+    if not results and cached:
+        results = [r.to_dict() for r in cached]
+    return results
+
+
+@app.post("/api/city/{city_key}/train-models")
+async def api_city_train_models(city_key: str):
+    db = get_db()
+    model_repo = ModelResultRepository(db)
+    trainer = get_ml_trainer()
+
+    results = trainer.train(city_key)
+    if not results:
+        return {"error": "Not enough data to train (need ≥60 valid days with hourly observations)"}
+
+    saved = []
+    for r in results:
+        d = r.to_dict()
+        blob = trainer.pickle_model(city_key, r.model_name)
+        model_repo.save_result(city_key, d, model_blob=blob)
+        saved.append(d)
+    return saved
+
+
+@app.post("/api/backfill-all")
+async def api_backfill_all(days: int = 365):
+    """Trigger a 1-year backfill for ALL configured cities sequentially."""
+    from src.weather.cities import CITIES
+    job_id = str(uuid.uuid4())[:8]
+    city_keys = list(CITIES.keys())
+    _jobs[job_id] = {
+        "status": "running", "type": "backfill_all",
+        "total_cities": len(city_keys), "done_cities": 0,
+        "current_city": None, "days": days,
+        "started": time.time(),
+    }
+    asyncio.create_task(_run_backfill_all_job(job_id, city_keys, days))
+    return {"job_id": job_id, "status": "running", "cities": len(city_keys), "days": days}
+
+
+async def _run_backfill_all_job(job_id: str, city_keys: list[str], days: int) -> None:
+    """Run backfills sequentially for all cities (reuses the single backfill semaphore)."""
+    from src.db.repositories import JobRunRepository
+    from src.weather.cities import get_city
+    from src.weather.historical_loader import HistoricalLoader
+    from src.weather.scraper import WUScraper
+
+    db = get_db()
+    job_repo = JobRunRepository(db)
+    run_id = job_repo.create_run("backfill_all", metadata={"days": days, "cities": city_keys})
+
+    total_stored = 0
+    failed_cities: list[str] = []
+
+    async with _backfill_semaphore:
+        scraper = WUScraper(headless=True)
+        await scraper.start()
+        try:
+            for idx, city_key in enumerate(city_keys):
+                _jobs[job_id]["current_city"] = city_key
+                _jobs[job_id]["done_cities"] = idx
+                city = get_city(city_key)
+                if city is None:
+                    continue
+                city_run_id = job_repo.create_run("backfill", city_key, metadata={"days": days})
+                try:
+                    repo = WeatherRepository(db)
+                    loader = HistoricalLoader(scraper, repo)
+                    await loader.backfill(city, days=days)
+                    cnt = db.conn.execute(
+                        "SELECT COUNT(*) as c FROM daily_peaks WHERE city_key = ?",
+                        (city_key,),
+                    ).fetchone()["c"]
+                    total_stored += cnt
+                    job_repo.finish_run(city_run_id, "success", records_processed=cnt)
+                    log.info("backfill_all_city_done", city=city_key, done=idx + 1, total=len(city_keys))
+                except Exception as exc:
+                    failed_cities.append(city_key)
+                    job_repo.finish_run(city_run_id, "error", error_message=str(exc))
+                    log.error("backfill_all_city_failed", city=city_key, error=str(exc))
+        finally:
+            await scraper.stop()
+
+    status = "success" if not failed_cities else "error"
+    job_repo.finish_run(run_id, status,
+                        records_processed=total_stored,
+                        error_message=f"Failed: {failed_cities}" if failed_cities else None)
+    _jobs[job_id] = {
+        "status": "complete", "type": "backfill_all",
+        "total_cities": len(city_keys), "done_cities": len(city_keys),
+        "failed_cities": failed_cities, "days": days,
+    }
+
+
+@app.post("/api/train-all-models")
+async def api_train_all_models():
+    """Train ML models for all cities that have ≥60 valid days of data."""
+    from src.weather.cities import CITIES
+
+    db = get_db()
+    model_repo = ModelResultRepository(db)
+    trainer = get_ml_trainer()
+
+    summary = {"trained": [], "skipped": [], "errors": []}
+
+    for city_key in CITIES:
+        try:
+            results = trainer.train(city_key)
+            if not results:
+                summary["skipped"].append(city_key)
+                continue
+            for r in results:
+                d = r.to_dict()
+                blob = trainer.pickle_model(city_key, r.model_name)
+                model_repo.save_result(city_key, d, model_blob=blob)
+            best_auc = max(r.test_auc for r in results)
+            summary["trained"].append({"city": city_key, "models": len(results), "best_auc": round(best_auc, 4)})
+            log.info("train_all_city_done", city=city_key, models=len(results), best_auc=round(best_auc, 4))
+        except Exception as exc:
+            summary["errors"].append({"city": city_key, "error": str(exc)})
+            log.error("train_all_city_failed", city=city_key, error=str(exc))
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Job monitoring
+# ---------------------------------------------------------------------------
+
+@app.get("/jobs", response_class=HTMLResponse)
+async def jobs_page(request: Request):
+    return templates.TemplateResponse("jobs.html", {"request": request})
+
+
+@app.get("/api/jobs")
+async def api_jobs(
+    job_type: str | None = None,
+    city_key: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    db = get_db()
+    repo = JobRunRepository(db)
+    rows = repo.list_runs(job_type=job_type, city_key=city_key, status=status, limit=limit, offset=offset)
+    summary = repo.get_summary_stats()
+    return {
+        "runs": [dict(r) for r in rows],
+        "total": summary["total_runs"],
+        "summary": summary,
+    }
+
+
+@app.get("/api/jobs/{run_id}")
+async def api_job_run(run_id: int):
+    db = get_db()
+    repo = JobRunRepository(db)
+    row = repo.get_run(run_id)
+    if not row:
+        return {"error": "Not found"}
+    return dict(row)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // {{ city.display_name if city else city_key }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; position: relative; overflow: hidden; }
+    .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(0,200,255,0.15), transparent); }
+    ::-webkit-scrollbar { width: 4px; height: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } } .spin { animation: spin 1s linear infinite; }
+    table { border-collapse: separate; border-spacing: 0; }
+    thead th { background: #111820; position: sticky; top: 0; z-index: 10; border-bottom: 1px solid #1a2030; }
+    tbody tr:hover { background: rgba(0,200,255,0.03); }
+    tbody td { border-bottom: 1px solid rgba(26,32,48,0.5); }
+    input[type="date"] { background: #0a0e14; border: 1px solid #1a2030; color: #8b9fc0; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 11px; }
+    input[type="date"]:focus { outline: none; border-color: #00c8ff; }
+    .btn { transition: all 0.15s; cursor: pointer; } .btn:hover { filter: brightness(1.2); } .btn:active { transform: scale(0.97); }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="p-4 max-w-[1400px] mx-auto space-y-4">
+
+    <!-- City info header -->
+    <div class="card rounded-md p-4">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="font-display font-bold text-term-bright text-xl">{{ city.display_name if city else city_key }}</h2>
+          <div class="text-term-muted text-[11px] mt-1 space-x-3">
+            <span>key: <span class="text-term-text">{{ city_key }}</span></span>
+            {% if city %}
+            <span>station: <span class="text-term-text">{{ city.wu_station_id }}</span></span>
+            <span>tz: <span class="text-term-text">{{ city.timezone }}</span></span>
+            <span>unit: <span class="text-term-text">{{ city.unit }}</span></span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button onclick="triggerBackfill(30)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 30d</button>
+          <button onclick="triggerBackfill(365)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 1yr</button>
+          <button onclick="trainModels()" id="train-btn" class="btn px-3 py-1.5 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[11px]">Train Models</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats strip -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="stats-strip">
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total Rows</div>
+        <div class="text-xl font-bold text-term-cyan font-display" id="stat-total">--</div>
+      </div>
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Avg Temp</div>
+        <div class="text-xl font-bold text-term-amber font-display" id="stat-avg">--</div>
+      </div>
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Min Temp</div>
+        <div class="text-xl font-bold text-term-bright font-display" id="stat-min">--</div>
+      </div>
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Max Temp</div>
+        <div class="text-xl font-bold text-term-red font-display" id="stat-max">--</div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card rounded-md p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-display font-semibold text-term-bright text-sm">Daily Temperature Peaks</h3>
+        <span class="text-term-muted text-[10px]">last 30 days</span>
+      </div>
+      <canvas id="peaks-chart" height="80"></canvas>
+    </div>
+
+    <!-- Hourly data table -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <h3 class="font-display font-semibold text-term-bright text-sm">Hourly Observations</h3>
+          <div class="flex items-center gap-2 flex-wrap">
+            <input type="date" id="filter-from" placeholder="From">
+            <input type="date" id="filter-to" placeholder="To">
+            <button onclick="applyFilter()" class="btn px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Filter</button>
+            <button onclick="clearFilter()" class="btn px-2 py-1 rounded bg-term-surface text-term-muted border border-term-border text-[10px]">Clear</button>
+            <span class="text-term-muted text-[10px]" id="table-info">--</span>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-auto max-h-[500px]">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+              <th class="px-4 py-2">Date</th>
+              <th class="px-2 py-2">Time</th>
+              <th class="px-2 py-2 text-right">Temp</th>
+              <th class="px-2 py-2 text-right">Dew Pt</th>
+              <th class="px-2 py-2 text-right">Humidity</th>
+              <th class="px-2 py-2">Wind Dir</th>
+              <th class="px-2 py-2 text-right">Wind Spd</th>
+              <th class="px-2 py-2 text-right">Wind Gust</th>
+              <th class="px-2 py-2 text-right">Pressure</th>
+              <th class="px-2 py-2 text-right">Precip</th>
+              <th class="px-2 py-2">Condition</th>
+            </tr>
+          </thead>
+          <tbody id="hourly-tbody">
+            <tr><td colspan="11" class="px-4 py-8 text-center text-term-muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- Pagination -->
+      <div class="px-4 py-2.5 border-t border-term-border flex items-center justify-between">
+        <div class="flex items-center gap-1" id="pagination">
+          <button onclick="gotoPage(currentPage - 1)" class="btn px-2 py-1 rounded bg-term-surface border border-term-border text-[10px] text-term-muted" id="btn-prev">Prev</button>
+          <span class="text-term-muted text-[10px]" id="page-info">--</span>
+          <button onclick="gotoPage(currentPage + 1)" class="btn px-2 py-1 rounded bg-term-surface border border-term-border text-[10px] text-term-muted" id="btn-next">Next</button>
+        </div>
+        <span class="text-term-muted text-[10px]">50 rows/page</span>
+      </div>
+    </div>
+
+    <!-- ML Model Results -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <h3 class="font-display font-semibold text-term-bright text-sm">ML Model Results</h3>
+        <button onclick="trainModels()" id="train-btn2" class="btn px-3 py-1 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[10px]">Train Models</button>
+      </div>
+      <div class="p-4" id="ml-section">
+        <div class="text-term-muted text-center py-4">Loading model results...</div>
+      </div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status-bar" class="hidden card rounded-md px-4 py-2 text-[11px]">
+      <span id="status-msg" class="text-term-cyan"></span>
+    </div>
+
+  </main>
+
+  <script>
+    const CITY_KEY = {{ city_key | tojson }};
+    const UNIT = {{ (city.unit if city else 'celsius') | tojson }};
+    const U = UNIT === 'fahrenheit' ? '°F' : '°C';
+
+    let currentPage = 1;
+    let totalPages = 1;
+    let filterFrom = '';
+    let filterTo = '';
+    let peaksChart = null;
+
+    function showStatus(msg, color='text-term-cyan') {
+      const bar = document.getElementById('status-bar');
+      const el = document.getElementById('status-msg');
+      el.textContent = msg;
+      el.className = color;
+      bar.classList.remove('hidden');
+    }
+    function hideStatus() { document.getElementById('status-bar').classList.add('hidden'); }
+
+    // ---- Stats ----
+    async function loadStats() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/stats`);
+      const d = await res.json();
+      const fmt = v => v != null ? parseFloat(v).toFixed(1) + U : '--';
+      document.getElementById('stat-total').textContent = (d.total_rows || 0).toLocaleString();
+      document.getElementById('stat-avg').textContent = fmt(d.avg_temp);
+      document.getElementById('stat-min').textContent = fmt(d.min_temp);
+      document.getElementById('stat-max').textContent = fmt(d.max_temp);
+    }
+
+    // ---- Chart ----
+    async function loadChart() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/daily-peaks?limit=30`);
+      const rows = await res.json();
+      const labels = rows.map(r => r.date);
+      const data = rows.map(r => r.peak_temp);
+
+      const ctx = document.getElementById('peaks-chart').getContext('2d');
+      if (peaksChart) peaksChart.destroy();
+      peaksChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: `Peak Temp (${U})`,
+            data,
+            borderColor: '#feb019',
+            backgroundColor: 'rgba(254,176,25,0.08)',
+            pointBackgroundColor: '#feb019',
+            pointRadius: 3,
+            tension: 0.3,
+            fill: true,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#0f1419',
+              titleColor: '#c5d4e8',
+              bodyColor: '#8b9fc0',
+              borderColor: '#1a2030',
+              borderWidth: 1,
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 10 },
+              grid: { color: 'rgba(26,32,48,0.5)' },
+            },
+            y: {
+              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + U },
+              grid: { color: 'rgba(26,32,48,0.5)' },
+            },
+          },
+        }
+      });
+    }
+
+    // ---- Hourly table ----
+    async function loadHourly(page) {
+      currentPage = page;
+      const params = new URLSearchParams({ page, page_size: 50 });
+      if (filterFrom) params.set('date_from', filterFrom);
+      if (filterTo) params.set('date_to', filterTo);
+
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/hourly?` + params);
+      const d = await res.json();
+      totalPages = d.total_pages || 1;
+
+      document.getElementById('table-info').textContent = `${d.total.toLocaleString()} rows`;
+      document.getElementById('page-info').textContent = `Page ${d.page} / ${d.total_pages}`;
+      document.getElementById('btn-prev').disabled = d.page <= 1;
+      document.getElementById('btn-next').disabled = d.page >= d.total_pages;
+
+      const fmt = v => v != null ? parseFloat(v).toFixed(1) : '--';
+      const tbody = document.getElementById('hourly-tbody');
+      if (!d.rows.length) {
+        tbody.innerHTML = '<tr><td colspan="11" class="px-4 py-8 text-center text-term-muted">No data for selected range.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = d.rows.map(r => `
+        <tr>
+          <td class="px-4 py-1.5 text-term-bright">${r.date}</td>
+          <td class="px-2 py-1.5 text-term-muted">${r.time_local}</td>
+          <td class="px-2 py-1.5 text-right text-term-amber font-medium">${fmt(r.temperature)}${U}</td>
+          <td class="px-2 py-1.5 text-right">${fmt(r.dew_point)}</td>
+          <td class="px-2 py-1.5 text-right">${r.humidity != null ? fmt(r.humidity) + '%' : '--'}</td>
+          <td class="px-2 py-1.5 text-term-muted">${r.wind_direction || '--'}</td>
+          <td class="px-2 py-1.5 text-right">${fmt(r.wind_speed)}</td>
+          <td class="px-2 py-1.5 text-right">${fmt(r.wind_gust)}</td>
+          <td class="px-2 py-1.5 text-right">${fmt(r.pressure)}</td>
+          <td class="px-2 py-1.5 text-right">${fmt(r.precip_rate)}</td>
+          <td class="px-2 py-1.5 text-term-muted truncate max-w-[120px]" title="${r.condition || ''}">${r.condition || '--'}</td>
+        </tr>
+      `).join('');
+    }
+
+    function gotoPage(p) {
+      if (p < 1 || p > totalPages) return;
+      loadHourly(p);
+    }
+
+    function applyFilter() {
+      filterFrom = document.getElementById('filter-from').value;
+      filterTo = document.getElementById('filter-to').value;
+      loadHourly(1);
+    }
+
+    function clearFilter() {
+      filterFrom = '';
+      filterTo = '';
+      document.getElementById('filter-from').value = '';
+      document.getElementById('filter-to').value = '';
+      loadHourly(1);
+    }
+
+    // ---- ML Results ----
+    async function loadMLResults() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/ml-results`);
+      const results = await res.json();
+      renderMLSection(results);
+    }
+
+    function renderMLSection(results) {
+      const el = document.getElementById('ml-section');
+      if (!results || results.error) {
+        const msg = results && results.error ? results.error : 'No model results yet. Click "Train Models" to train.';
+        el.innerHTML = `<div class="text-term-muted text-center py-4 text-[11px]">${msg}</div>`;
+        return;
+      }
+      if (!Array.isArray(results) || !results.length) {
+        el.innerHTML = '<div class="text-term-muted text-center py-4 text-[11px]">No model results yet. Click "Train Models" to train.<br><span class="text-term-amber">Need ≥60 days of valid observations (peak_hour > 0). Use "Backfill 1yr" to collect more data.</span></div>';
+        return;
+      }
+
+      // Detect schema: new classification results have train_auc; old regression results have train_rmse
+      const isClassification = 'train_auc' in results[0];
+
+      if (!isClassification) {
+        el.innerHTML = '<div class="text-term-muted text-center py-4 text-[11px]">Stored results are from the old regression model. Click "Train Models" to retrain with the new classification model.</div>';
+        return;
+      }
+
+      // Best model = highest test AUC
+      const best = results.reduce((a, b) => (a.test_auc > b.test_auc ? a : b));
+
+      // --- Model comparison table ---
+      let html = `
+        <div class="mb-4">
+          <div class="text-term-muted text-[10px] uppercase tracking-wider mb-2">Model Comparison — "Is this the peak hour?" (AUC-ROC)</div>
+          <table class="w-full text-[11px]">
+            <thead>
+              <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+                <th class="px-2 py-1.5">Model</th>
+                <th class="px-2 py-1.5 text-right" title="AUC-ROC on training set (1.0 = perfect, 0.5 = random)">Train AUC</th>
+                <th class="px-2 py-1.5 text-right" title="AUC-ROC on validation set">Val AUC</th>
+                <th class="px-2 py-1.5 text-right" title="AUC-ROC on held-out test set — primary metric">Test AUC ↑</th>
+                <th class="px-2 py-1.5 text-right" title="P(correct | model says this is the peak hour)">Precision</th>
+                <th class="px-2 py-1.5 text-right" title="P(model detected the peak | it IS the peak hour)">Recall</th>
+                <th class="px-2 py-1.5 text-right">Trained</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${results.map(r => {
+                const isBest = r.model_name === best.model_name;
+                const aucClass = v => v >= 0.80 ? 'text-term-green' : v >= 0.65 ? 'text-term-amber' : 'text-term-red';
+                const precClass = v => v >= 0.6 ? 'text-term-green' : v >= 0.4 ? 'text-term-amber' : 'text-term-red';
+                return `<tr class="${isBest ? 'bg-term-cyan/5' : ''}">
+                  <td class="px-2 py-1.5 ${isBest ? 'text-term-cyan font-bold' : 'text-term-bright'}">${r.model_name}${isBest ? ' ★' : ''}</td>
+                  <td class="px-2 py-1.5 text-right ${aucClass(r.train_auc)}">${r.train_auc}</td>
+                  <td class="px-2 py-1.5 text-right ${aucClass(r.val_auc)}">${isNaN(r.val_auc) ? '--' : r.val_auc}</td>
+                  <td class="px-2 py-1.5 text-right font-medium ${aucClass(r.test_auc)}">${r.test_auc}</td>
+                  <td class="px-2 py-1.5 text-right ${precClass(r.test_precision)}">${(r.test_precision * 100).toFixed(0)}%</td>
+                  <td class="px-2 py-1.5 text-right ${precClass(r.test_recall)}">${(r.test_recall * 100).toFixed(0)}%</td>
+                  <td class="px-2 py-1.5 text-right text-term-muted text-[10px]">${r.trained_at || '--'}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+          <div class="text-term-muted text-[10px] mt-2">
+            n_train=${best.n_train}d / n_val=${best.n_val}d / n_test=${best.n_test}d (days) &nbsp;·&nbsp;
+            pos_train=${best.n_pos_train} peak-hour rows out of ${best.n_train * 15} total training rows
+          </div>
+          <div class="text-term-muted text-[10px] mt-1">
+            <span class="text-term-green">AUC ≥ 0.80</span> = strong signal.
+            <span class="text-term-amber">0.65–0.79</span> = moderate.
+            <span class="text-term-red">&lt; 0.65</span> = barely better than random (need more data).
+            AUC = 0.5 is pure random.
+          </div>
+        </div>`;
+
+      // --- Feature importance (RandomForest, best ranked by AUC) ---
+      const withImportances = results.filter(r => r.feature_importances && r.feature_importances.length);
+      if (withImportances.length) {
+        const imp_model = withImportances.reduce((a, b) => (a.test_auc > b.test_auc ? a : b));
+        const maxImp = Math.max(...imp_model.feature_importances);
+        html += `
+          <div class="mb-4">
+            <div class="text-term-muted text-[10px] uppercase tracking-wider mb-2">Feature Importance — ${imp_model.model_name}</div>
+            <div class="space-y-1">
+              ${imp_model.feature_names.map((name, i) => {
+                const val = imp_model.feature_importances[i];
+                const pct = maxImp > 0 ? (val / maxImp * 100) : 0;
+                return `<div class="flex items-center gap-2 text-[10px]">
+                  <span class="w-44 text-term-muted truncate">${name}</span>
+                  <div class="flex-1 h-3 bg-term-bg rounded-sm overflow-hidden">
+                    <div class="h-full rounded-sm bg-term-purple/60" style="width:${pct}%"></div>
+                  </div>
+                  <span class="w-10 text-right text-term-text">${(val * 100).toFixed(1)}%</span>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>`;
+      }
+
+      // --- Per-date prediction summary ---
+      if (best.predictions_vs_actual && best.predictions_vs_actual.length) {
+        const preds = best.predictions_vs_actual.slice(-20);
+        const correct = preds.filter(p => p.correct).length;
+        html += `
+          <div>
+            <div class="text-term-muted text-[10px] uppercase tracking-wider mb-2">
+              Per-Day Peak Hour — ${best.model_name} (test set, last 20 days)
+              <span class="ml-2 ${correct/preds.length >= 0.5 ? 'text-term-green' : 'text-term-amber'}">${correct}/${preds.length} days correct</span>
+            </div>
+            <div class="overflow-auto max-h-[240px]">
+              <table class="w-full text-[11px]">
+                <thead>
+                  <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+                    <th class="px-2 py-1.5">Date</th>
+                    <th class="px-2 py-1.5 text-right">Actual Peak Hr</th>
+                    <th class="px-2 py-1.5 text-right" title="Hour the model assigned highest P(peak)">Model's Top Hr</th>
+                    <th class="px-2 py-1.5 text-right" title="P(peak) at model's chosen hour">Confidence</th>
+                    <th class="px-2 py-1.5 text-center">Match</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${preds.map(p => `<tr>
+                    <td class="px-2 py-1 text-term-muted">${p.date}</td>
+                    <td class="px-2 py-1 text-right text-term-bright">${p.actual}:00</td>
+                    <td class="px-2 py-1 text-right ${p.correct ? 'text-term-green' : 'text-term-red'}">${p.predicted}:00</td>
+                    <td class="px-2 py-1 text-right text-term-muted">${(p.confidence * 100).toFixed(1)}%</td>
+                    <td class="px-2 py-1 text-center">${p.correct
+                      ? '<span class="text-term-green">✓</span>'
+                      : `<span class="text-term-red">✗ (off by ${Math.abs(p.predicted - p.actual)}h)</span>`}</td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+            <div class="text-term-muted text-[10px] mt-1">
+              Model scans all hours 6–20 and picks the one with highest P(this is the peak hour).
+              At runtime: call model at current hour to get live probability.
+            </div>
+          </div>`;
+      }
+
+      el.innerHTML = html;
+    }
+
+    // ---- Train models ----
+    async function trainModels() {
+      const btn = document.getElementById('train-btn');
+      const btn2 = document.getElementById('train-btn2');
+      [btn, btn2].forEach(b => { if (b) { b.disabled = true; b.textContent = 'Training...'; } });
+      showStatus('Training ML models...', 'text-term-purple');
+
+      try {
+        const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/train-models`, { method: 'POST' });
+        const results = await res.json();
+        if (results && results.error) {
+          showStatus('Training failed: ' + results.error, 'text-term-red');
+        } else if (!Array.isArray(results) || !results.length) {
+          showStatus('Need ≥60 valid days (peak_hour > 0). Run "Backfill 1yr" first.', 'text-term-amber');
+        } else {
+          hideStatus();
+        }
+        renderMLSection(results);
+      } catch (e) {
+        showStatus('Training failed: ' + e.message, 'text-term-red');
+      } finally {
+        [btn, btn2].forEach(b => { if (b) { b.disabled = false; b.textContent = 'Train Models'; } });
+      }
+    }
+
+    // ---- Backfill ----
+    async function triggerBackfill(days) {
+      showStatus(`Starting ${days}-day backfill for ${CITY_KEY}... (this may take a few minutes for long periods)`);
+      const res = await fetch(`/api/backfill/${encodeURIComponent(CITY_KEY)}?days=${days}`, { method: 'POST' });
+      const d = await res.json();
+      if (d.job_id) {
+        pollJob(d.job_id);
+      }
+    }
+
+    async function pollJob(jobId) {
+      const poll = async () => {
+        const res = await fetch(`/api/job/${jobId}`);
+        const d = await res.json();
+        if (d.status === 'running') { setTimeout(poll, 3000); return; }
+        if (d.status === 'complete') {
+          showStatus(`Backfill done: ${d.total_peaks} peaks`, 'text-term-green');
+          setTimeout(hideStatus, 3000);
+          await loadStats();
+          await loadChart();
+        } else {
+          showStatus('Backfill error: ' + (d.error || 'unknown'), 'text-term-red');
+        }
+      };
+      setTimeout(poll, 2000);
+    }
+
+    // ---- Init ----
+    loadStats();
+    loadChart();
+    loadHourly(1);
+    loadMLResults();
+  </script>
+</body>
+</html>

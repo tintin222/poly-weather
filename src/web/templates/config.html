@@ -36,6 +36,7 @@
         <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
         <a href="/config" class="text-term-cyan">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
       </nav>
     </div>
   </header>
@@ -95,6 +96,9 @@
         <div class="flex gap-3 mt-4">
           <button type="submit" class="px-4 py-2 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[12px] font-medium hover:bg-term-cyan/20">
             Save Settings
+          </button>
+          <button type="button" onclick="resolveBets()" class="px-4 py-2 rounded bg-term-green/10 text-term-green border border-term-green/20 text-[12px] font-medium hover:bg-term-green/20">
+            Resolve Settled Bets
           </button>
           <button type="button" onclick="resetAccount()" class="px-4 py-2 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[12px] font-medium hover:bg-term-red/20">
             Reset Account (Delete All Bets)
@@ -197,6 +201,18 @@
       setTimeout(() => msg.className = 'mt-2 text-[11px] hidden', 3000);
       loadAccount();
     });
+
+    async function resolveBets() {
+      const msg = document.getElementById('save-msg');
+      msg.textContent = 'Resolving settled bets...';
+      msg.className = 'mt-2 text-[11px] text-term-cyan';
+      const res = await fetch('/api/resolve-bets', { method: 'POST' });
+      const data = await res.json();
+      msg.textContent = `Resolved ${data.resolved} bet(s). Refreshing...`;
+      msg.className = 'mt-2 text-[11px] text-term-green';
+      setTimeout(() => { msg.className = 'mt-2 text-[11px] hidden'; }, 4000);
+      loadAccount();
+    }
 
     async function resetAccount() {
       if (!confirm('Delete ALL bets and reset balance? This cannot be undone.')) return;

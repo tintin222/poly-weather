@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any
@@ -151,6 +152,56 @@ class WeatherRepository:
             "SELECT * FROM daily_peaks WHERE city_key = ? AND date = ?",
             (city_key, date),
         ).fetchone()
+
+    def get_hourly_paginated(
+        self,
+        city_key: str,
+        page: int = 1,
+        page_size: int = 50,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[list[sqlite3.Row], int]:
+        conditions = ["city_key = ?"]
+        params: list[Any] = [city_key]
+        if date_from:
+            conditions.append("date >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("date <= ?")
+            params.append(date_to)
+        where = " AND ".join(conditions)
+        total = self._db.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM hourly_observations WHERE {where}", params
+        ).fetchone()["cnt"]
+        offset = (page - 1) * page_size
+        rows = self._db.conn.execute(
+            f"""SELECT * FROM hourly_observations WHERE {where}
+                ORDER BY date DESC, hour DESC
+                LIMIT ? OFFSET ?""",
+            [*params, page_size, offset],
+        ).fetchall()
+        return rows, total
+
+    def get_city_stats(self, city_key: str) -> dict:
+        row = self._db.conn.execute(
+            """SELECT
+                COUNT(*) as total_rows,
+                AVG(temperature) as avg_temp,
+                MIN(temperature) as min_temp,
+                MAX(temperature) as max_temp,
+                MIN(date) as min_date,
+                MAX(date) as max_date
+               FROM hourly_observations WHERE city_key = ?""",
+            (city_key,),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def get_recent_daily_peaks(self, city_key: str, limit: int = 30) -> list[sqlite3.Row]:
+        return self._db.conn.execute(
+            """SELECT * FROM daily_peaks WHERE city_key = ?
+               ORDER BY date ASC LIMIT ?""",
+            (city_key, limit),
+        ).fetchall()
 
     def get_historical_peaks(
         self, city_key: str, month: int, day_start: int, day_end: int,
@@ -304,8 +355,190 @@ class MarketRepository:
             "SELECT * FROM bets WHERE date = ? ORDER BY created_at", (date,)
         ).fetchall()
 
+    def get_pending_bets_for_event(self, event_id: str) -> list[sqlite3.Row]:
+        return self._db.conn.execute(
+            "SELECT * FROM bets WHERE event_id = ? AND won IS NULL",
+            (event_id,),
+        ).fetchall()
+
+    def resolve_bet(self, bet_id: int, won: int, pnl: float) -> None:
+        self._db.conn.execute(
+            "UPDATE bets SET won = ?, pnl = ?, resolved_at = ? WHERE id = ?",
+            (won, round(pnl, 2), int(time.time()), bet_id),
+        )
+        self._db.conn.commit()
+
     def get_daily_exposure(self, date: str) -> float:
         row = self._db.conn.execute(
             "SELECT COALESCE(SUM(cost), 0) as total FROM bets WHERE date = ?", (date,)
         ).fetchone()
         return float(row["total"]) if row else 0.0
+
+
+class JobRunRepository:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create_run(
+        self,
+        job_type: str,
+        city_key: str | None = None,
+        metadata: dict | None = None,
+    ) -> int:
+        cursor = self._db.conn.execute(
+            """INSERT INTO job_runs (job_type, city_key, status, started_at, metadata_json)
+               VALUES (?, ?, 'running', ?, ?)""",
+            (job_type, city_key, int(time.time()), json.dumps(metadata) if metadata else None),
+        )
+        self._db.conn.commit()
+        return cursor.lastrowid or 0
+
+    def finish_run(
+        self,
+        run_id: int,
+        status: str,
+        records_processed: int | None = None,
+        error_message: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._db.conn.execute(
+            """UPDATE job_runs
+               SET status = ?, finished_at = ?, records_processed = ?,
+                   error_message = ?, metadata_json = COALESCE(?, metadata_json)
+               WHERE id = ?""",
+            (
+                status, int(time.time()), records_processed, error_message,
+                json.dumps(metadata) if metadata else None, run_id,
+            ),
+        )
+        self._db.conn.commit()
+
+    def list_runs(
+        self,
+        job_type: str | None = None,
+        city_key: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        conditions = []
+        params: list[Any] = []
+        if job_type:
+            conditions.append("job_type = ?")
+            params.append(job_type)
+        if city_key:
+            conditions.append("city_key = ?")
+            params.append(city_key)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        return self._db.conn.execute(
+            f"SELECT * FROM job_runs {where} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+
+    def get_run(self, run_id: int) -> sqlite3.Row | None:
+        return self._db.conn.execute(
+            "SELECT * FROM job_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+
+    def get_summary_stats(self) -> dict:
+        total = self._db.conn.execute("SELECT COUNT(*) as v FROM job_runs").fetchone()["v"]
+        succeeded = self._db.conn.execute(
+            "SELECT COUNT(*) as v FROM job_runs WHERE status = 'success'"
+        ).fetchone()["v"]
+        cutoff = int(time.time()) - 86400
+        last_24h = self._db.conn.execute(
+            "SELECT COUNT(*) as v FROM job_runs WHERE started_at >= ?", (cutoff,)
+        ).fetchone()["v"]
+        success_rate = round(succeeded / total * 100, 1) if total > 0 else 0.0
+        return {"total_runs": total, "success_rate": success_rate, "runs_last_24h": last_24h}
+
+
+class ModelResultRepository:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def save_result(self, city_key: str, result: dict, model_blob: bytes | None = None) -> int:
+        cursor = self._db.conn.execute(
+            """INSERT INTO model_results
+               (city_key, model_name, trained_at, n_train, n_val, n_test,
+                train_rmse, val_rmse, test_rmse, train_r2, test_r2, results_json, model_blob)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                city_key,
+                result.get("model_name"),
+                int(time.time()),
+                result.get("n_train"),
+                result.get("n_val"),
+                result.get("n_test"),
+                result.get("train_rmse"),
+                result.get("val_rmse"),
+                result.get("test_rmse"),
+                result.get("train_r2"),
+                result.get("test_r2"),
+                json.dumps(result),
+                model_blob,
+            ),
+        )
+        self._db.conn.commit()
+        return cursor.lastrowid or 0
+
+    def get_latest_results(self, city_key: str) -> list[dict]:
+        """Get the most recent result for each model_name for the given city."""
+        rows = self._db.conn.execute(
+            """SELECT results_json FROM model_results
+               WHERE id IN (
+                   SELECT MAX(id) FROM model_results
+                   WHERE city_key = ?
+                   GROUP BY model_name
+               )
+               ORDER BY model_name""",
+            (city_key,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            try:
+                results.append(json.loads(row["results_json"]))
+            except Exception:
+                pass
+        return results
+
+    def get_best_model_blob(self, city_key: str) -> tuple[str, bytes] | None:
+        """Return (model_name, pickle_blob) for the city's best model (highest test_auc).
+
+        Returns None if no model with a blob is stored for this city.
+        """
+        rows = self._db.conn.execute(
+            """SELECT model_name, results_json, model_blob FROM model_results
+               WHERE city_key = ? AND model_blob IS NOT NULL
+               AND id IN (
+                   SELECT MAX(id) FROM model_results
+                   WHERE city_key = ? AND model_blob IS NOT NULL
+                   GROUP BY model_name
+               )""",
+            (city_key, city_key),
+        ).fetchall()
+        if not rows:
+            return None
+        # Pick best by test_auc (classification) or test_rmse (regression fallback)
+        best = None
+        best_score = -1.0
+        for row in rows:
+            try:
+                r = json.loads(row["results_json"])
+                score = float(r.get("test_auc") or 0)
+                if score > best_score:
+                    best_score = score
+                    best = (row["model_name"], bytes(row["model_blob"]))
+            except Exception:
+                continue
+        return best
+
+    def get_trained_city_keys(self) -> list[str]:
+        """Return all city_keys that have at least one stored model result."""
+        rows = self._db.conn.execute(
+            "SELECT DISTINCT city_key FROM model_results ORDER BY city_key"
+        ).fetchall()
+        return [r["city_key"] for r in rows]

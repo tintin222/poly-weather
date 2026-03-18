@@ -156,6 +156,7 @@
         <a href="/" class="text-term-cyan">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
       </nav>
       <span class="px-2 py-0.5 rounded text-[10px] font-semibold tracking-wider uppercase
         {% if paper_bets > 0 %}bg-term-amber/10 text-term-amber border border-term-amber/20
@@ -257,7 +258,7 @@
             <tbody>
               {% for bet in recent_bets %}
               <tr>
-                <td class="px-4 py-2 text-term-bright font-medium">{{ bet.city_key }}</td>
+                <td class="px-4 py-2 text-term-bright font-medium"><a href="/city/{{ bet.city_key | urlencode }}" class="hover:text-term-cyan">{{ bet.city_key }}</a></td>
                 <td class="px-2 py-2 text-term-muted">{{ bet.date }}</td>
                 <td class="px-2 py-2">
                   <span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">
@@ -322,7 +323,7 @@
               <tbody>
                 {% for event in active_events %}
                 <tr>
-                  <td class="px-4 py-1.5 text-term-bright">{{ event.city_key }}</td>
+                  <td class="px-4 py-1.5 text-term-bright"><a href="/city/{{ event.city_key | urlencode }}" class="hover:text-term-cyan">{{ event.city_key }}</a></td>
                   <td class="px-2 py-1.5 text-term-muted">{{ event.date }}</td>
                   <td class="px-2 py-1.5 text-right text-term-cyan">{{ event.bracket_count }}</td>
                 </tr>
@@ -356,7 +357,7 @@
               <tbody>
                 {% for peak in latest_peaks %}
                 <tr>
-                  <td class="px-4 py-1.5 text-term-bright">{{ peak.city_key }}</td>
+                  <td class="px-4 py-1.5 text-term-bright"><a href="/city/{{ peak.city_key | urlencode }}" class="hover:text-term-cyan">{{ peak.city_key }}</a></td>
                   <td class="px-2 py-1.5 text-term-muted">{{ peak.date }}</td>
                   <td class="px-2 py-1.5 text-right text-term-amber font-medium">{{ "%.1f"|format(peak.peak_temp) }}°</td>
                   <td class="px-2 py-1.5 text-right">{{ peak.peak_hour }}:00</td>

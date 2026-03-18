@@ -69,8 +69,8 @@ class HistoricalLoader:
             "backfill_start",
             city=city.key,
             days=days,
-            start_date=str(today - timedelta(days=1)),
-            end_date=str(today - timedelta(days=days)),
+            oldest_date=str(today - timedelta(days=days)),
+            newest_date=str(today - timedelta(days=1)),
         )
 
         for i in range(1, days + 1):

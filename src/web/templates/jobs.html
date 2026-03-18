@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // jobs</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    select { background: #0a0e14; border: 1px solid #1a2030; color: #8b9fc0; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 11px; }
+    select:focus { outline: none; border-color: #00c8ff; }
+    table { border-collapse: separate; border-spacing: 0; }
+    thead th { background: #111820; position: sticky; top: 0; z-index: 10; border-bottom: 1px solid #1a2030; }
+    tbody tr:hover { background: rgba(0,200,255,0.03); }
+    tbody td { border-bottom: 1px solid rgba(26,32,48,0.5); }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-cyan">Jobs</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-3 text-[10px] text-term-muted">
+      <span>auto-refresh: <span id="countdown">30</span>s</span>
+    </div>
+  </header>
+
+  <main class="p-4 max-w-[1400px] mx-auto space-y-4">
+
+    <!-- Summary strip -->
+    <div class="grid grid-cols-3 gap-3" id="summary-strip">
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total Runs</div>
+        <div class="text-xl font-bold text-term-cyan font-display" id="stat-total">--</div>
+      </div>
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Success Rate</div>
+        <div class="text-xl font-bold font-display" id="stat-rate">--</div>
+      </div>
+      <div class="card rounded-md p-3">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Last 24h</div>
+        <div class="text-xl font-bold text-term-amber font-display" id="stat-24h">--</div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="card rounded-md p-3 flex items-center gap-3 flex-wrap">
+      <div class="flex items-center gap-2">
+        <label class="text-term-muted text-[10px]">Type</label>
+        <select id="filter-type" onchange="loadJobs()">
+          <option value="">All</option>
+          <option value="scrape">scrape</option>
+          <option value="backfill">backfill</option>
+          <option value="market_poll">market_poll</option>
+          <option value="orchestrator_cycle">orchestrator_cycle</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="text-term-muted text-[10px]">Status</label>
+        <select id="filter-status" onchange="loadJobs()">
+          <option value="">All</option>
+          <option value="running">running</option>
+          <option value="success">success</option>
+          <option value="error">error</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="text-term-muted text-[10px]">City</label>
+        <input type="text" id="filter-city" placeholder="city_key..." oninput="loadJobs()"
+          style="background:#0a0e14;border:1px solid #1a2030;color:#8b9fc0;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:11px;width:120px">
+      </div>
+      <button onclick="loadJobs()" class="px-3 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Refresh</button>
+    </div>
+
+    <!-- Bulk Operations -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border">
+        <h2 class="font-display font-semibold text-term-bright text-sm">Bulk Operations</h2>
+      </div>
+      <div class="p-4 flex flex-col gap-4">
+        <!-- Backfill All Cities -->
+        <div class="flex items-start gap-4 flex-wrap">
+          <div class="flex-1 min-w-[200px]">
+            <div class="text-term-bright text-[11px] font-semibold mb-0.5">Backfill All Cities</div>
+            <div class="text-term-muted text-[10px]">Scrape 1 year of historical weather data for all 23 cities sequentially. Takes ~60–90 min due to rate limiting.</div>
+          </div>
+          <button id="btn-backfill-all" onclick="startBackfillAll()"
+            class="px-4 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px] hover:bg-term-amber/20 whitespace-nowrap">
+            Backfill All (1yr)
+          </button>
+        </div>
+        <div id="backfill-progress" class="hidden">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-term-muted text-[10px]" id="backfill-status-text">Starting...</span>
+            <span class="text-term-muted text-[10px]" id="backfill-job-id"></span>
+          </div>
+          <div class="w-full bg-term-border rounded-full h-1.5">
+            <div id="backfill-bar" class="bg-term-amber h-1.5 rounded-full transition-all" style="width:0%"></div>
+          </div>
+          <div id="backfill-city-log" class="mt-2 text-[10px] text-term-muted max-h-[80px] overflow-y-auto space-y-0.5"></div>
+        </div>
+        <div class="border-t border-term-border"></div>
+        <!-- Train All Models -->
+        <div class="flex items-start gap-4 flex-wrap">
+          <div class="flex-1 min-w-[200px]">
+            <div class="text-term-bright text-[11px] font-semibold mb-0.5">Train All Models</div>
+            <div class="text-term-muted text-[10px]">Train classification models for every city that has ≥60 days of historical data. Runs in seconds.</div>
+          </div>
+          <button id="btn-train-all" onclick="startTrainAll()"
+            class="px-4 py-1.5 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[11px] hover:bg-term-purple/20 whitespace-nowrap">
+            Train All Models
+          </button>
+        </div>
+        <div id="train-results" class="hidden">
+          <div class="text-term-muted text-[10px] mb-2" id="train-summary"></div>
+          <div id="train-city-list" class="grid grid-cols-2 gap-1.5 text-[10px]"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Jobs table -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <h2 class="font-display font-semibold text-term-bright text-sm">Job Runs</h2>
+        <span class="text-term-muted text-[10px]" id="run-count">--</span>
+      </div>
+      <div class="overflow-auto max-h-[600px]">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+              <th class="px-4 py-2">#</th>
+              <th class="px-2 py-2">Type</th>
+              <th class="px-2 py-2">City</th>
+              <th class="px-2 py-2 text-center">Status</th>
+              <th class="px-2 py-2">Started</th>
+              <th class="px-2 py-2 text-right">Duration</th>
+              <th class="px-2 py-2 text-right">Records</th>
+              <th class="px-2 py-2">Error</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody">
+            <tr><td colspan="8" class="px-4 py-8 text-center text-term-muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    function fmtDuration(run) {
+      if (!run.finished_at) return '<span class="text-term-muted">--</span>';
+      const s = run.finished_at - run.started_at;
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60), r = s % 60;
+      return `${m}m ${r}s`;
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '--';
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    function statusBadge(status) {
+      if (status === 'running') {
+        return `<span class="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-term-cyan/10 text-term-cyan border border-term-cyan/20">
+          <span class="w-1.5 h-1.5 rounded-full bg-term-cyan pulse-dot inline-block"></span>running</span>`;
+      }
+      if (status === 'success') {
+        return `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green border border-term-green/20">success</span>`;
+      }
+      return `<span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red border border-term-red/20">error</span>`;
+    }
+
+    async function loadJobs() {
+      const type = document.getElementById('filter-type').value;
+      const status = document.getElementById('filter-status').value;
+      const city = document.getElementById('filter-city').value.trim();
+
+      const params = new URLSearchParams({ limit: 200 });
+      if (type) params.set('job_type', type);
+      if (status) params.set('status', status);
+      if (city) params.set('city_key', city);
+
+      const res = await fetch('/api/jobs?' + params);
+      const data = await res.json();
+
+      // Summary
+      const s = data.summary;
+      document.getElementById('stat-total').textContent = s.total_runs.toLocaleString();
+      const rateEl = document.getElementById('stat-rate');
+      rateEl.textContent = `${s.success_rate}%`;
+      rateEl.className = `text-xl font-bold font-display ${s.success_rate >= 90 ? 'text-term-green' : s.success_rate >= 70 ? 'text-term-amber' : 'text-term-red'}`;
+      document.getElementById('stat-24h').textContent = s.runs_last_24h;
+
+      document.getElementById('run-count').textContent = `${data.runs.length} runs`;
+
+      const tbody = document.getElementById('jobs-tbody');
+      if (!data.runs.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-term-muted">No job runs yet.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = data.runs.map(r => `
+        <tr>
+          <td class="px-4 py-1.5 text-term-muted">${r.id}</td>
+          <td class="px-2 py-1.5 text-term-bright">${r.job_type}</td>
+          <td class="px-2 py-1.5">
+            ${r.city_key ? `<a href="/city/${encodeURIComponent(r.city_key)}" class="text-term-cyan hover:underline">${r.city_key}</a>` : '<span class="text-term-muted">--</span>'}
+          </td>
+          <td class="px-2 py-1.5 text-center">${statusBadge(r.status)}</td>
+          <td class="px-2 py-1.5 text-term-muted text-[10px]">${fmtTime(r.started_at)}</td>
+          <td class="px-2 py-1.5 text-right text-term-text">${fmtDuration(r)}</td>
+          <td class="px-2 py-1.5 text-right text-term-text">${r.records_processed ?? '--'}</td>
+          <td class="px-2 py-1.5 text-term-red text-[10px] max-w-[200px] truncate" title="${r.error_message || ''}">${r.error_message || ''}</td>
+        </tr>
+      `).join('');
+    }
+
+    // Auto-refresh countdown
+    let secs = 30;
+    const cdEl = document.getElementById('countdown');
+    setInterval(() => {
+      secs--;
+      if (secs <= 0) { secs = 30; loadJobs(); }
+      cdEl.textContent = secs;
+    }, 1000);
+
+    loadJobs();
+
+    // ── Bulk Operations ──────────────────────────────────────────────────────
+
+    let backfillPollTimer = null;
+
+    async function startBackfillAll() {
+      const btn = document.getElementById('btn-backfill-all');
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+
+      try {
+        const res = await fetch('/api/backfill-all?days=365', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.statusText);
+
+        const jobId = data.job_id;
+        document.getElementById('backfill-job-id').textContent = `job #${jobId}`;
+        document.getElementById('backfill-progress').classList.remove('hidden');
+        btn.textContent = 'Running...';
+        pollBackfill(jobId);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Backfill All (1yr)';
+        alert('Failed to start backfill: ' + e.message);
+      }
+    }
+
+    async function pollBackfill(jobId) {
+      try {
+        const res = await fetch(`/api/job/${jobId}`);
+        const job = await res.json();
+
+        const statusText = document.getElementById('backfill-status-text');
+        const bar = document.getElementById('backfill-bar');
+        const log = document.getElementById('backfill-city-log');
+
+        // Parse progress from records_processed / error_message
+        if (job.status === 'running') {
+          const done = job.done_cities || 0;
+          const total = job.total_cities || 23;
+          const pct = Math.round((done / total) * 100);
+          bar.style.width = pct + '%';
+          const cur = job.current_city ? ` (${job.current_city})` : '';
+          statusText.textContent = `Backfilling… ${done}/${total} cities${cur}`;
+          backfillPollTimer = setTimeout(() => pollBackfill(jobId), 5000);
+        } else if (job.status === 'complete') {
+          const failed = (job.failed_cities || []).length;
+          bar.style.width = '100%';
+          bar.classList.replace('bg-term-amber', failed ? 'bg-term-amber' : 'bg-term-green');
+          const total = job.total_cities || 23;
+          statusText.textContent = `Done — ${total - failed}/${total} cities OK${failed ? `, ${failed} failed` : ''}`;
+          const btn = document.getElementById('btn-backfill-all');
+          btn.disabled = false;
+          btn.textContent = 'Backfill All (1yr)';
+          loadJobs();
+        } else {
+          bar.classList.replace('bg-term-amber', 'bg-term-red');
+          statusText.textContent = `Error: ${job.error_message || job.error || 'unknown'}`;
+          const btn = document.getElementById('btn-backfill-all');
+          btn.disabled = false;
+          btn.textContent = 'Backfill All (1yr)';
+        }
+      } catch (e) {
+        backfillPollTimer = setTimeout(() => pollBackfill(jobId), 10000);
+      }
+    }
+
+    async function startTrainAll() {
+      const btn = document.getElementById('btn-train-all');
+      btn.disabled = true;
+      btn.textContent = 'Training...';
+
+      try {
+        const res = await fetch('/api/train-all-models', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.statusText);
+
+        const resultsEl = document.getElementById('train-results');
+        const summaryEl = document.getElementById('train-summary');
+        const listEl = document.getElementById('train-city-list');
+
+        resultsEl.classList.remove('hidden');
+        summaryEl.textContent = `Trained: ${data.trained.length} cities  |  Skipped: ${data.skipped.length}  |  Errors: ${data.errors.length}`;
+
+        listEl.innerHTML = data.trained.map(t => `
+          <div class="card rounded px-3 py-1.5 flex items-center justify-between gap-2">
+            <a href="/city/${encodeURIComponent(t.city)}" class="text-term-cyan hover:underline">${t.city}</a>
+            <span class="text-term-green font-semibold">AUC ${(t.best_auc * 100).toFixed(1)}%</span>
+          </div>
+        `).join('') + data.errors.map(e => `
+          <div class="card rounded px-3 py-1.5 flex items-center justify-between gap-2">
+            <span class="text-term-muted">${e.city}</span>
+            <span class="text-term-red text-[10px] truncate max-w-[140px]" title="${e.error}">${e.error}</span>
+          </div>
+        `).join('');
+      } catch (e) {
+        alert('Training failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Train All Models';
+      }
+    }
+  </script>
+</body>
+</html>

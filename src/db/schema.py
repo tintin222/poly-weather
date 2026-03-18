@@ -126,4 +126,35 @@ CREATE TABLE IF NOT EXISTS paper_account (
     min_edge        REAL NOT NULL DEFAULT 0.05,
     updated_at      INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS job_runs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type          TEXT NOT NULL,
+    city_key          TEXT,
+    status            TEXT NOT NULL DEFAULT 'running',
+    started_at        INTEGER NOT NULL,
+    finished_at       INTEGER,
+    records_processed INTEGER,
+    error_message     TEXT,
+    metadata_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_job_runs_started ON job_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_runs_type_city ON job_runs(job_type, city_key);
+
+CREATE TABLE IF NOT EXISTS model_results (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_key     TEXT NOT NULL,
+    model_name   TEXT NOT NULL,
+    trained_at   INTEGER NOT NULL,
+    n_train      INTEGER,
+    n_val        INTEGER,
+    n_test       INTEGER,
+    train_rmse   REAL,
+    val_rmse     REAL,
+    test_rmse    REAL,
+    train_r2     REAL,
+    test_r2      REAL,
+    results_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_model_results_city ON model_results(city_key, trained_at DESC);
 """

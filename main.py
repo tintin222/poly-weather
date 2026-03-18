@@ -4,8 +4,8 @@ Used for Railway deployment and local development.
 """
 
 import asyncio
+import os
 import threading
-import sys
 
 import uvicorn
 
@@ -51,7 +51,7 @@ def main():
         log.info("bot_auto_start_disabled", msg="Dashboard-only mode. Use /opportunities for manual trading.")
 
     # Run the FastAPI dashboard on the main thread
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    port = int(os.environ.get("PORT", 8000))
     host = "0.0.0.0"
     log.info("dashboard_starting", host=host, port=port)
 

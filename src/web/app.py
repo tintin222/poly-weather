@@ -383,8 +383,11 @@ async def api_opportunities():
         if not city:
             continue
 
-        today = today_in_tz(city.timezone)
-        current_hour = current_hour_in_tz(city.timezone)
+        from src.utils.time_utils import now_in_tz
+        city_now = now_in_tz(city.timezone)
+        today = city_now.strftime("%Y-%m-%d")
+        current_hour = city_now.hour
+        current_minute = city_now.minute
         is_today = event_date == today
 
         # Auto-actions
@@ -498,6 +501,7 @@ async def api_opportunities():
             "is_today": is_today,
             "is_closed": event_status == "closed",
             "current_hour": current_hour if is_today else None,
+            "current_time": f"{current_hour}:{current_minute:02d}" if is_today else None,
             "unit": city.unit if city else "celsius",
             "hist_days": hist_count,
             "mean_peak_hour": round(mean_peak_hour, 1) if mean_peak_hour is not None else None,

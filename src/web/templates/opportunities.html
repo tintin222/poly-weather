@@ -465,7 +465,7 @@
             <div class="flex items-center gap-2">
               <span class="phase-badge border ${phaseCfg.color}">${phaseCfg.icon} ${phaseCfg.label}</span>
               ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" class="px-2 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20">PM&nearr;</a>` : ''}
-              ${o.current_hour != null ? `<span class="text-term-muted text-[10px]">${o.current_hour}:00</span>` : ''}
+              ${o.current_time ? `<span class="text-term-muted text-[10px]">Now ${o.current_time}</span>` : ''}
             </div>
           </div>
           ${timingLabel ? `<div class="px-4 py-1.5 border-b border-term-border/50 text-[10px] ${phaseCfg.color.split(' ')[1]}">${phaseCfg.icon} ${timingLabel}</div>` : ''}

@@ -67,6 +67,8 @@
           </div>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
+          <button onclick="purgeRescrape(30)" class="btn px-3 py-1.5 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[11px]" title="Delete all data and re-scrape with correct timezone">Purge & Re-scrape 30d</button>
+          <button onclick="purgeRescrape(365)" class="btn px-3 py-1.5 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[11px]" title="Delete all data and re-scrape with correct timezone">Purge & Re-scrape 1yr</button>
           <button onclick="triggerBackfill(30)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 30d</button>
           <button onclick="triggerBackfill(365)" class="btn px-3 py-1.5 rounded bg-term-amber/10 text-term-amber border border-term-amber/20 text-[11px]">Backfill 1yr</button>
           <button onclick="trainModels()" id="train-btn" class="btn px-3 py-1.5 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[11px]">Train Models</button>
@@ -474,6 +476,23 @@
       } finally {
         [btn, btn2].forEach(b => { if (b) { b.disabled = false; b.textContent = 'Train Models'; } });
       }
+    }
+
+    // ---- Purge & Re-scrape ----
+    async function purgeRescrape(days) {
+      if (!confirm(`This will DELETE all existing observations and peaks for ${CITY_KEY}, then re-scrape ${days} days with correct timezone. Continue?`)) return;
+      showStatus(`Purging ${CITY_KEY} data and starting ${days}-day re-scrape...`);
+      const res = await fetch(`/api/purge-rescrape/${encodeURIComponent(CITY_KEY)}?days=${days}`, { method: 'POST' });
+      const d = await res.json();
+      if (d.error) {
+        showStatus('Error: ' + d.error, 'text-term-red');
+        return;
+      }
+      showStatus(`Purged ${d.purged_obs} obs + ${d.purged_peaks} peaks. Re-scraping ${days} days...`);
+      if (d.job_id) pollJob(d.job_id);
+      // Refresh stats immediately to show cleared state
+      await loadStats();
+      await loadHourly(1);
     }
 
     // ---- Backfill ----

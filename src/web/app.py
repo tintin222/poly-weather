@@ -643,6 +643,90 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
             _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
 
 
+@app.post("/api/purge-rescrape/{city_key}")
+async def api_purge_rescrape(city_key: str, days: int = 30):
+    """Purge ALL observations + daily peaks for a city, then re-backfill.
+
+    Use this after deploying the Playwright timezone fix to replace
+    data that was scraped with wrong timezone (UTC instead of local).
+    """
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    db = get_db()
+
+    # Count existing data
+    obs_count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM hourly_observations WHERE city_key = ?",
+        (city_key,),
+    ).fetchone()["cnt"]
+    peak_count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+        (city_key,),
+    ).fetchone()["cnt"]
+
+    # Purge
+    db.conn.execute("DELETE FROM hourly_observations WHERE city_key = ?", (city_key,))
+    db.conn.execute("DELETE FROM daily_peaks WHERE city_key = ?", (city_key,))
+    db.conn.commit()
+    log.info("purge_complete", city=city_key, obs_deleted=obs_count, peaks_deleted=peak_count)
+
+    # Reset backfill tracking so auto-backfill can retrigger
+    _backfill_started.discard(city_key)
+    _scrape_started.discard(f"{city_key}:{__import__('src.utils.time_utils', fromlist=['today_in_tz']).today_in_tz(city.timezone)}")
+
+    # Start a fresh backfill
+    job_id = f"purge-{city_key[:8].lower()}-{uuid.uuid4().hex[:4]}"
+    _jobs[job_id] = {
+        "status": "running", "type": "purge_rescrape", "city": city_key,
+        "days": days, "started": time.time(),
+        "purged_obs": obs_count, "purged_peaks": peak_count,
+    }
+    asyncio.create_task(_run_backfill_job(job_id, city, days))
+    return {
+        "job_id": job_id, "status": "running",
+        "purged_obs": obs_count, "purged_peaks": peak_count,
+        "backfill_days": days,
+    }
+
+
+@app.post("/api/purge-rescrape-all")
+async def api_purge_rescrape_all(days: int = 365):
+    """Purge and re-scrape ALL cities. Use after timezone fix deployment."""
+    from src.weather.cities import CITIES
+
+    db = get_db()
+    results = {}
+    for city_key in CITIES:
+        obs = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM hourly_observations WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
+        peaks = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
+        db.conn.execute("DELETE FROM hourly_observations WHERE city_key = ?", (city_key,))
+        db.conn.execute("DELETE FROM daily_peaks WHERE city_key = ?", (city_key,))
+        _backfill_started.discard(city_key)
+        results[city_key] = {"purged_obs": obs, "purged_peaks": peaks}
+    db.conn.commit()
+
+    # Start backfill-all job
+    job_id = f"purge-all-{uuid.uuid4().hex[:4]}"
+    city_keys = list(CITIES.keys())
+    _jobs[job_id] = {
+        "status": "running", "type": "purge_rescrape_all",
+        "total_cities": len(city_keys), "done_cities": 0,
+        "current_city": None, "days": days,
+        "started": time.time(),
+    }
+    asyncio.create_task(_run_backfill_all_job(job_id, city_keys, days))
+    return {"job_id": job_id, "status": "running", "cities": results, "backfill_days": days}
+
+
 @app.post("/api/backfill/{city_key}")
 async def api_backfill(city_key: str, days: int = 30):
     """Trigger a historical backfill for a city. Returns a job_id to poll."""

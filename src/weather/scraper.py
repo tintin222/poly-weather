@@ -18,14 +18,38 @@ FORECAST_URL = "https://www.wunderground.com/hourly"
 
 
 def _parse_time(time_str: str) -> tuple[int, str]:
-    """Convert 12h time string like '1:30 PM' to (hour_int, '13:30') 24h format."""
+    """Convert a time string to (hour_int, 'HH:MM') 24h format.
+
+    Handles:
+      - 12-hour AM/PM: '1:30 PM' → (13, '13:30'), '11 AM' → (11, '11:00')
+      - 24-hour: '15:00' → (15, '15:00'), '0:20' → (0, '00:20')
+    """
     time_str = time_str.strip()
+
+    # Try 12-hour AM/PM formats first (WU default for US locale)
     for fmt in ("%I:%M %p", "%I %p"):
         try:
             dt = datetime.strptime(time_str, fmt)
             return dt.hour, dt.strftime("%H:%M")
         except ValueError:
             continue
+
+    # Try 24-hour formats (some WU locales or non-US pages)
+    for fmt in ("%H:%M", "%H"):
+        try:
+            dt = datetime.strptime(time_str, fmt)
+            return dt.hour, dt.strftime("%H:%M")
+        except ValueError:
+            continue
+
+    # Last resort: extract digits that look like H:MM or HH:MM
+    match = re.match(r"(\d{1,2}):(\d{2})", time_str)
+    if match:
+        hour = int(match.group(1))
+        minute = match.group(2)
+        if 0 <= hour <= 23:
+            return hour, f"{hour:02d}:{minute}"
+
     log.warning("unparseable_time", time_str=time_str)
     return 0, "00:00"
 

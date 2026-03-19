@@ -18,14 +18,38 @@ FORECAST_URL = "https://www.wunderground.com/hourly"
 
 
 def _parse_time(time_str: str) -> tuple[int, str]:
-    """Convert 12h time string like '1:30 PM' to (hour_int, '13:30') 24h format."""
+    """Convert a time string to (hour_int, 'HH:MM') 24h format.
+
+    Handles:
+      - 12-hour AM/PM: '1:30 PM' → (13, '13:30'), '11 AM' → (11, '11:00')
+      - 24-hour: '15:00' → (15, '15:00'), '0:20' → (0, '00:20')
+    """
     time_str = time_str.strip()
+
+    # Try 12-hour AM/PM formats first (WU default for US locale)
     for fmt in ("%I:%M %p", "%I %p"):
         try:
             dt = datetime.strptime(time_str, fmt)
             return dt.hour, dt.strftime("%H:%M")
         except ValueError:
             continue
+
+    # Try 24-hour formats (some WU locales or non-US pages)
+    for fmt in ("%H:%M", "%H"):
+        try:
+            dt = datetime.strptime(time_str, fmt)
+            return dt.hour, dt.strftime("%H:%M")
+        except ValueError:
+            continue
+
+    # Last resort: extract digits that look like H:MM or HH:MM
+    match = re.match(r"(\d{1,2}):(\d{2})", time_str)
+    if match:
+        hour = int(match.group(1))
+        minute = match.group(2)
+        if 0 <= hour <= 23:
+            return hour, f"{hour:02d}:{minute}"
+
     log.warning("unparseable_time", time_str=time_str)
     return 0, "00:00"
 
@@ -90,6 +114,8 @@ class WUScraper:
         """Launch the Playwright browser."""
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=self._headless)
+        # Default context (no timezone override) — used as fallback.
+        # Per-city scrapes create their own context with the correct timezone.
         self._context = await self._browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -99,6 +125,24 @@ class WUScraper:
             viewport={"width": 1280, "height": 900},
         )
         log.info("scraper_started")
+
+    async def _create_city_context(self, city: CityConfig) -> BrowserContext:
+        """Create a browser context with the city's timezone.
+
+        WU may use browser-side JavaScript to format observation timestamps.
+        Setting the correct timezone ensures times render in the station's
+        local time, not in the server's system timezone (often UTC).
+        """
+        return await self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+            timezone_id=city.timezone,
+            locale="en-US",
+        )
 
     async def stop(self) -> None:
         """Close the browser and clean up."""
@@ -130,6 +174,9 @@ class WUScraper:
     ) -> list[HourlyObservation]:
         """Scrape hourly observation data for a city on a given date.
 
+        Creates a temporary browser context with the city's timezone so
+        that WU's JavaScript renders observation times in local time.
+
         Args:
             city: CityConfig for the target city.
             date: Date string in YYYY-MM-DD format, or None for today.
@@ -137,13 +184,15 @@ class WUScraper:
         Returns:
             List of HourlyObservation objects parsed from the page.
         """
-        if not self._context:
+        if not self._browser:
             raise RuntimeError("Scraper not started. Call .start() first.")
 
         url = self._build_url(city, date)
-        log.info("scraping_page", city=city.key, date=date or "today", url=url)
+        log.info("scraping_page", city=city.key, date=date or "today", url=url, timezone=city.timezone)
 
-        page: Page = await self._context.new_page()
+        # Use a per-city context with the correct timezone
+        city_ctx = await self._create_city_context(city)
+        page: Page = await city_ctx.new_page()
         try:
             await page.goto(url, wait_until="networkidle", timeout=60000)
 
@@ -188,6 +237,7 @@ class WUScraper:
             return []
         finally:
             await page.close()
+            await city_ctx.close()
 
     async def _extract_observations(
         self, page: Page, city: CityConfig
@@ -308,13 +358,14 @@ class WUScraper:
         Returns:
             Forecast high temperature (in city's unit), or None if scraping fails.
         """
-        if not self._context:
+        if not self._browser:
             raise RuntimeError("Scraper not started. Call .start() first.")
 
         url = f"{FORECAST_URL}/{city.wu_url_path}"
         log.info("scraping_forecast", city=city.key, url=url)
 
-        page = await self._context.new_page()
+        city_ctx = await self._create_city_context(city)
+        page = await city_ctx.new_page()
         try:
             await page.goto(url, wait_until="networkidle", timeout=60000)
             await page.wait_for_selector("table", timeout=15000)
@@ -362,6 +413,7 @@ class WUScraper:
             return None
         finally:
             await page.close()
+            await city_ctx.close()
 
     def _map_columns(self, headers: list[str]) -> dict[str, int]:
         """Map column names to indices based on header text."""

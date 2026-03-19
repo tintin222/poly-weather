@@ -303,6 +303,13 @@ async def api_status():
     return {"total_bets": total, "pending_bets": pending, "observations": obs, "status": "running"}
 
 
+@app.get("/api/bot-status")
+async def api_bot_status():
+    """Return the current auto-betting bot status."""
+    from src.strategy.bot_status import bot_status
+    return bot_status.to_dict()
+
+
 @app.get("/api/bets")
 async def api_bets(limit: int = 50):
     db = get_db()
@@ -376,8 +383,11 @@ async def api_opportunities():
         if not city:
             continue
 
-        today = today_in_tz(city.timezone)
-        current_hour = current_hour_in_tz(city.timezone)
+        from src.utils.time_utils import now_in_tz
+        city_now = now_in_tz(city.timezone)
+        today = city_now.strftime("%Y-%m-%d")
+        current_hour = city_now.hour
+        current_minute = city_now.minute
         is_today = event_date == today
 
         # Auto-actions
@@ -411,6 +421,7 @@ async def api_opportunities():
         # Peak confidence from PeakPredictor
         peak_conf = None
         peak_detail = None
+        mean_peak_hour = None
         hist_count = db.conn.execute(
             "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
             (city_key,),
@@ -420,7 +431,8 @@ async def api_opportunities():
             try:
                 from src.model.features import compute_current_max
                 max_temp, _ = compute_current_max(observations)
-                predictor.train(city_key, event_date, window_days=15, years_back=1)
+                dist = predictor.train(city_key, event_date, window_days=15, years_back=1)
+                mean_peak_hour = dist.mean_peak_hour
                 prediction = predictor.predict_confidence(
                     city_key, current_hour, max_temp, observations
                 )
@@ -432,6 +444,13 @@ async def api_opportunities():
                 }
             except Exception as exc:
                 log.warning("confidence_error", city=city_key, error=str(exc))
+        elif hist_count >= 5:
+            # Even without today's observations, get mean peak hour for sorting
+            try:
+                dist = predictor.train(city_key, event_date, window_days=15, years_back=1)
+                mean_peak_hour = dist.mean_peak_hour
+            except Exception:
+                pass
 
         # Generate peak-confidence based guidance
         guidance = generate_peak_guidance(
@@ -451,6 +470,26 @@ async def api_opportunities():
         slug = event["slug"]
         event_status = event["status"]
 
+        # Peak proximity: how far (in hours) is the current time from the
+        # historical mean peak hour.  Negative = before peak, positive = after.
+        hours_to_peak = None  # signed distance
+        peak_proximity = None  # absolute distance
+        peak_phase = "UNKNOWN"
+
+        if is_today and mean_peak_hour is not None:
+            hours_to_peak = round(current_hour - mean_peak_hour, 1)
+            peak_proximity = round(abs(hours_to_peak), 1)
+            if peak_proximity <= 1:
+                peak_phase = "AT_PEAK"
+            elif peak_proximity <= 3:
+                peak_phase = "NEAR_PEAK"
+            elif hours_to_peak < 0:
+                peak_phase = "APPROACHING"
+            else:
+                peak_phase = "COOLING"
+        elif not is_today:
+            peak_phase = "FUTURE"
+
         opportunities.append({
             "event_id": event["event_id"],
             "city_key": city_key,
@@ -462,8 +501,13 @@ async def api_opportunities():
             "is_today": is_today,
             "is_closed": event_status == "closed",
             "current_hour": current_hour if is_today else None,
+            "current_time": f"{current_hour}:{current_minute:02d}" if is_today else None,
             "unit": city.unit if city else "celsius",
             "hist_days": hist_count,
+            "mean_peak_hour": round(mean_peak_hour, 1) if mean_peak_hour is not None else None,
+            "hours_to_peak": hours_to_peak,
+            "peak_proximity": peak_proximity,
+            "peak_phase": peak_phase,
             "g": {
                 "action": guidance.action,
                 "reason": guidance.reason,
@@ -488,7 +532,18 @@ async def api_opportunities():
             },
         })
 
-    opportunities.sort(key=lambda o: (not o["is_today"], o["date"], o["city_key"]))
+    # Sort: today's opportunities by peak proximity (closest to peak first),
+    # then future events by date.  Within equal proximity, sort by city name.
+    def _sort_key(o):
+        if o["is_today"]:
+            # Primary: today first (0), Secondary: peak proximity ascending
+            prox = o["peak_proximity"] if o["peak_proximity"] is not None else 99
+            return (0, prox, o["city_key"])
+        else:
+            # Future events after today's, sorted by date
+            return (1, 0, o["date"], o["city_key"])
+
+    opportunities.sort(key=_sort_key)
     return opportunities
 
 
@@ -586,6 +641,90 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
             log.error("scrape_job_failed", job_id=job_id, error=str(exc))
             job_repo.finish_run(run_id, "error", error_message=str(exc))
             _jobs[job_id] = {"status": "error", "type": "scrape", "error": str(exc)}
+
+
+@app.post("/api/purge-rescrape/{city_key}")
+async def api_purge_rescrape(city_key: str, days: int = 30):
+    """Purge ALL observations + daily peaks for a city, then re-backfill.
+
+    Use this after deploying the Playwright timezone fix to replace
+    data that was scraped with wrong timezone (UTC instead of local).
+    """
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    db = get_db()
+
+    # Count existing data
+    obs_count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM hourly_observations WHERE city_key = ?",
+        (city_key,),
+    ).fetchone()["cnt"]
+    peak_count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+        (city_key,),
+    ).fetchone()["cnt"]
+
+    # Purge
+    db.conn.execute("DELETE FROM hourly_observations WHERE city_key = ?", (city_key,))
+    db.conn.execute("DELETE FROM daily_peaks WHERE city_key = ?", (city_key,))
+    db.conn.commit()
+    log.info("purge_complete", city=city_key, obs_deleted=obs_count, peaks_deleted=peak_count)
+
+    # Reset backfill tracking so auto-backfill can retrigger
+    _backfill_started.discard(city_key)
+    _scrape_started.discard(f"{city_key}:{__import__('src.utils.time_utils', fromlist=['today_in_tz']).today_in_tz(city.timezone)}")
+
+    # Start a fresh backfill
+    job_id = f"purge-{city_key[:8].lower()}-{uuid.uuid4().hex[:4]}"
+    _jobs[job_id] = {
+        "status": "running", "type": "purge_rescrape", "city": city_key,
+        "days": days, "started": time.time(),
+        "purged_obs": obs_count, "purged_peaks": peak_count,
+    }
+    asyncio.create_task(_run_backfill_job(job_id, city, days))
+    return {
+        "job_id": job_id, "status": "running",
+        "purged_obs": obs_count, "purged_peaks": peak_count,
+        "backfill_days": days,
+    }
+
+
+@app.post("/api/purge-rescrape-all")
+async def api_purge_rescrape_all(days: int = 365):
+    """Purge and re-scrape ALL cities. Use after timezone fix deployment."""
+    from src.weather.cities import CITIES
+
+    db = get_db()
+    results = {}
+    for city_key in CITIES:
+        obs = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM hourly_observations WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
+        peaks = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_peaks WHERE city_key = ?",
+            (city_key,),
+        ).fetchone()["cnt"]
+        db.conn.execute("DELETE FROM hourly_observations WHERE city_key = ?", (city_key,))
+        db.conn.execute("DELETE FROM daily_peaks WHERE city_key = ?", (city_key,))
+        _backfill_started.discard(city_key)
+        results[city_key] = {"purged_obs": obs, "purged_peaks": peaks}
+    db.conn.commit()
+
+    # Start backfill-all job
+    job_id = f"purge-all-{uuid.uuid4().hex[:4]}"
+    city_keys = list(CITIES.keys())
+    _jobs[job_id] = {
+        "status": "running", "type": "purge_rescrape_all",
+        "total_cities": len(city_keys), "done_cities": 0,
+        "current_city": None, "days": days,
+        "started": time.time(),
+    }
+    asyncio.create_task(_run_backfill_all_job(job_id, city_keys, days))
+    return {"job_id": job_id, "status": "running", "cities": results, "backfill_days": days}
 
 
 @app.post("/api/backfill/{city_key}")

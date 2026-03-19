@@ -124,6 +124,27 @@
           <div id="backfill-city-log" class="mt-2 text-[10px] text-term-muted max-h-[80px] overflow-y-auto space-y-0.5"></div>
         </div>
         <div class="border-t border-term-border"></div>
+        <!-- Purge & Re-scrape All -->
+        <div class="flex items-start gap-4 flex-wrap">
+          <div class="flex-1 min-w-[200px]">
+            <div class="text-term-red text-[11px] font-semibold mb-0.5">Purge & Re-scrape All Cities</div>
+            <div class="text-term-muted text-[10px]">Deletes ALL existing observations and peaks for every city, then re-scrapes with correct timezone. Use after deploying the timezone fix.</div>
+          </div>
+          <button id="btn-purge-all" onclick="startPurgeAll()"
+            class="px-4 py-1.5 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[11px] hover:bg-term-red/20 whitespace-nowrap">
+            Purge & Re-scrape All (1yr)
+          </button>
+        </div>
+        <div id="purge-progress" class="hidden">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-term-muted text-[10px]" id="purge-status-text">Starting...</span>
+            <span class="text-term-muted text-[10px]" id="purge-job-id"></span>
+          </div>
+          <div class="w-full bg-term-border rounded-full h-1.5">
+            <div id="purge-bar" class="bg-term-red h-1.5 rounded-full transition-all" style="width:0%"></div>
+          </div>
+        </div>
+        <div class="border-t border-term-border"></div>
         <!-- Train All Models -->
         <div class="flex items-start gap-4 flex-wrap">
           <div class="flex-1 min-w-[200px]">
@@ -315,6 +336,73 @@
         }
       } catch (e) {
         backfillPollTimer = setTimeout(() => pollBackfill(jobId), 10000);
+      }
+    }
+
+    async function startPurgeAll() {
+      if (!confirm('This will DELETE all weather data for ALL cities, then re-scrape 1 year with correct timezone. This cannot be undone. Continue?')) return;
+
+      const btn = document.getElementById('btn-purge-all');
+      btn.disabled = true;
+      btn.textContent = 'Purging...';
+
+      try {
+        const res = await fetch('/api/purge-rescrape-all?days=365', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.statusText);
+
+        const jobId = data.job_id;
+        document.getElementById('purge-job-id').textContent = `job #${jobId}`;
+        document.getElementById('purge-progress').classList.remove('hidden');
+        btn.textContent = 'Running...';
+
+        // Show purge summary
+        const cities = data.cities || {};
+        const totalPurged = Object.values(cities).reduce((sum, c) => sum + (c.purged_obs || 0), 0);
+        document.getElementById('purge-status-text').textContent = `Purged ${totalPurged.toLocaleString()} observations. Re-scraping...`;
+
+        pollPurge(jobId);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Purge & Re-scrape All (1yr)';
+        alert('Failed: ' + e.message);
+      }
+    }
+
+    async function pollPurge(jobId) {
+      try {
+        const res = await fetch(`/api/job/${jobId}`);
+        const job = await res.json();
+
+        const statusText = document.getElementById('purge-status-text');
+        const bar = document.getElementById('purge-bar');
+
+        if (job.status === 'running') {
+          const done = job.done_cities || 0;
+          const total = job.total_cities || 23;
+          const pct = Math.round((done / total) * 100);
+          bar.style.width = pct + '%';
+          const cur = job.current_city ? ` (${job.current_city})` : '';
+          statusText.textContent = `Re-scraping… ${done}/${total} cities${cur}`;
+          setTimeout(() => pollPurge(jobId), 5000);
+        } else if (job.status === 'complete') {
+          const failed = (job.failed_cities || []).length;
+          const total = job.total_cities || 23;
+          bar.style.width = '100%';
+          if (!failed) bar.classList.replace('bg-term-red', 'bg-term-green');
+          statusText.textContent = `Done — ${total - failed}/${total} cities re-scraped${failed ? `, ${failed} failed` : ''}`;
+          const btn = document.getElementById('btn-purge-all');
+          btn.disabled = false;
+          btn.textContent = 'Purge & Re-scrape All (1yr)';
+          loadJobs();
+        } else {
+          statusText.textContent = `Error: ${job.error_message || job.error || 'unknown'}`;
+          const btn = document.getElementById('btn-purge-all');
+          btn.disabled = false;
+          btn.textContent = 'Purge & Re-scrape All (1yr)';
+        }
+      } catch (e) {
+        setTimeout(() => pollPurge(jobId), 10000);
       }
     }
 

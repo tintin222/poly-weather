@@ -18,6 +18,7 @@ from src.model.ml_trainer import MLTrainer
 from src.model.peak_predictor import PeakPredictor
 from src.polymarket.market_monitor import MarketMonitor
 from src.polymarket.trader import PolymarketTrader
+from src.strategy.bot_status import bot_status
 from src.utils.logger import get_logger
 from src.utils.time_utils import current_hour_in_tz, today_in_tz
 from src.weather.cities import get_city
@@ -150,6 +151,27 @@ class Orchestrator:
 
         # Evaluate
         await self._evaluate_city(city)
+
+    async def _evaluate_cities_only(self) -> None:
+        """Evaluate all today's cities using existing weather data (no scrape).
+
+        Called on every market poll cycle so we react to price changes
+        without waiting for the next scrape window.
+        """
+        cities_today = self._get_todays_cities()
+        if not cities_today:
+            return
+
+        bot_status.last_action = f"Evaluating {len(cities_today)} cities"
+        bot_status.log_event("evaluate", f"Evaluating {len(cities_today)} cities (prices updated)")
+
+        for city in cities_today:
+            try:
+                await self._evaluate_city(city)
+                bot_status.cities_evaluated += 1
+            except Exception as exc:
+                log.error("evaluate_only_error", city=city.key, error=str(exc))
+                bot_status.errors_recent += 1
 
     async def _evaluate_city(self, city: CityConfig) -> None:
         """Evaluate using peak-confidence: bet when peak has passed with high confidence."""
@@ -312,6 +334,16 @@ class Orchestrator:
             )
 
             daily_spent += cost
+
+            bot_status.bets_placed += 1
+            bot_status.last_bet_at = time.time()
+            bot_status.log_event(
+                "AUTO_BET",
+                f"{city.key}: {matching['label']} @ {price*100:.0f}¢, "
+                f"conf={confidence*100:.0f}%, edge=+{edge*100:.0f}%, "
+                f"cost=${cost:.2f}, paper={order_result.is_paper}",
+            )
+
             log.info("AUTO_BET", city=city.key, bracket=matching["label"],
                      conf=f"{confidence*100:.0f}%", price=f"{price*100:.0f}¢",
                      edge=f"+{edge*100:.0f}%", cost=f"${cost:.2f}",
@@ -325,7 +357,17 @@ class Orchestrator:
         return minute in (5, 35)
 
     async def run_loop(self, market_interval_minutes: int = 5) -> None:
-        """Run the orchestrator in a continuous loop."""
+        """Run the orchestrator in a continuous loop.
+
+        - Market prices polled every ``market_interval_minutes``
+        - After each market poll, re-evaluate all cities with existing weather data
+        - Weather scrape at :05 and :35 past each hour (full scrape + evaluate)
+        """
+        bot_status.running = True
+        bot_status.started_at = time.time()
+        bot_status.last_action = "Starting up"
+        bot_status.log_event("start", f"Bot started, paper={self._settings.paper_mode}")
+
         log.info("orchestrator_started",
                  market_interval=market_interval_minutes,
                  weather_schedule="every :05 and :35",
@@ -340,19 +382,33 @@ class Orchestrator:
                 import datetime
                 current_minute = datetime.datetime.now().minute
 
+                # Poll market prices and evaluate on every interval
                 if now - last_market_poll >= market_interval_minutes * 60:
                     poll_run_id = self._job_repo.create_run("market_poll")
                     try:
                         count = await self._market_monitor.poll_all()
                         self._job_repo.finish_run(poll_run_id, "success", records_processed=count)
+                        bot_status.last_action = f"Polled {count} markets"
+                        bot_status.log_event("market_poll", f"Polled {count} markets")
                     except Exception as exc:
                         self._job_repo.finish_run(poll_run_id, "error", error_message=str(exc))
+                        bot_status.errors_recent += 1
+                        bot_status.log_event("error", f"Market poll failed: {exc}")
                         raise
                     last_market_poll = now
 
+                    # Re-evaluate cities with existing data after each price update
+                    await self._evaluate_cities_only()
+                    bot_status.cycle_count += 1
+                    bot_status.last_cycle_at = time.time()
+
+                # Full scrape + evaluate at :05 and :35
                 if self._is_wu_scrape_time() and current_minute != last_weather_minute:
                     last_weather_minute = current_minute
                     log.info("wu_scrape_triggered", minute=current_minute)
+                    bot_status.last_action = "Scraping weather data"
+                    bot_status.log_event("scrape", f"Weather scrape triggered at :{current_minute:02d}")
+
                     cities_today = self._get_todays_cities()
                     if cities_today:
                         scraper = WUScraper(headless=True)
@@ -366,6 +422,8 @@ class Orchestrator:
                                 except Exception as exc:
                                     self._job_repo.finish_run(scrape_run_id, "error", error_message=str(exc))
                                     log.error("evaluation_error", city=city.key, error=str(exc))
+                                    bot_status.errors_recent += 1
+                                    bot_status.log_event("error", f"Scrape failed for {city.key}: {exc}")
                         finally:
                             await scraper.stop()
 
@@ -373,11 +431,17 @@ class Orchestrator:
 
             except KeyboardInterrupt:
                 log.info("orchestrator_stopped")
+                bot_status.running = False
+                bot_status.log_event("stop", "Stopped by user")
                 break
             except Exception as exc:
                 log.error("orchestrator_error", error=str(exc))
+                bot_status.errors_recent += 1
+                bot_status.log_event("error", f"Loop error: {exc}")
                 await asyncio.sleep(60)
 
     def shutdown(self) -> None:
         self._db.close()
+        bot_status.running = False
+        bot_status.log_event("shutdown", "Orchestrator shutdown")
         log.info("orchestrator_shutdown")

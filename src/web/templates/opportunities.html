@@ -23,6 +23,7 @@
     @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
     .btn { transition: all 0.15s; } .btn:hover { filter: brightness(1.2); } .btn:active { transform: scale(0.97); }
     input[type="number"] { background: #0a0e14; border: 1px solid #1a2030; color: #c5d4e8; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+    .phase-badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
   </style>
 </head>
 <body class="text-term-text text-xs min-h-screen">
@@ -41,11 +42,36 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
+      <div id="bot-indicator" class="flex items-center gap-1.5 px-2 py-1 rounded border border-term-border text-[10px] text-term-muted cursor-pointer" onclick="toggleBotPanel()" title="Click for bot details">
+        <div id="bot-dot" class="w-1.5 h-1.5 rounded-full bg-term-muted"></div>
+        <span id="bot-label">Bot: checking...</span>
+      </div>
       <button onclick="toggleSettled()" id="filter-settled-btn" class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">Show settled</button>
       <button onclick="refreshMarkets()" id="refresh-btn" class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">Refresh Markets</button>
       <button onclick="loadOpportunities()" class="btn px-3 py-1.5 rounded bg-term-surface text-term-text border border-term-border text-[11px]">Reload</button>
     </div>
   </header>
+
+  <!-- Bot status panel (hidden by default) -->
+  <div id="bot-panel" class="hidden border-b border-term-border bg-term-surface/50">
+    <div class="px-4 py-3 max-w-[1400px] mx-auto">
+      <div class="flex items-start gap-6">
+        <div>
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Auto-Bet Bot</div>
+          <div id="bot-detail-status" class="text-[11px] text-term-bright">--</div>
+          <div id="bot-detail-action" class="text-[10px] text-term-muted mt-0.5">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Stats</div>
+          <div id="bot-detail-stats" class="text-[10px] text-term-text">--</div>
+        </div>
+        <div class="flex-1">
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Recent Activity</div>
+          <div id="bot-detail-log" class="text-[10px] text-term-muted max-h-24 overflow-y-auto space-y-0.5">--</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="status-bar" class="px-4 py-1.5 text-[10px] text-term-muted border-b border-term-border hidden">
     <span id="status-msg"></span>
@@ -60,6 +86,62 @@
   <script>
     let opportunities = [];
     let hideSettled = true;
+    let botPanelOpen = false;
+
+    // Bot status polling
+    async function loadBotStatus() {
+      try {
+        const res = await fetch('/api/bot-status');
+        const s = await res.json();
+        const dot = document.getElementById('bot-dot');
+        const label = document.getElementById('bot-label');
+
+        if (s.running) {
+          dot.className = 'w-1.5 h-1.5 rounded-full bg-term-green pulse-dot';
+          label.textContent = `Bot: ON (${s.bets_placed} bets)`;
+          label.className = 'text-term-green';
+          document.getElementById('bot-indicator').className =
+            'flex items-center gap-1.5 px-2 py-1 rounded border border-term-green/30 bg-term-green/5 text-[10px] cursor-pointer';
+        } else {
+          dot.className = 'w-1.5 h-1.5 rounded-full bg-term-red';
+          label.textContent = 'Bot: OFF';
+          label.className = 'text-term-red';
+          document.getElementById('bot-indicator').className =
+            'flex items-center gap-1.5 px-2 py-1 rounded border border-term-red/30 bg-term-red/5 text-[10px] cursor-pointer';
+        }
+
+        // Update panel details
+        const upH = Math.floor(s.uptime_seconds / 3600);
+        const upM = Math.floor((s.uptime_seconds % 3600) / 60);
+        document.getElementById('bot-detail-status').textContent =
+          s.running ? `Running for ${upH}h ${upM}m` : 'Not running';
+        document.getElementById('bot-detail-action').textContent = s.last_action || 'Idle';
+        document.getElementById('bot-detail-stats').innerHTML =
+          `Cycles: ${s.cycle_count} | Bets: ${s.bets_placed} | Cities eval'd: ${s.cities_evaluated} | Errors: ${s.errors_recent}` +
+          (s.last_bet_at ? `<br>Last bet: ${timeAgo(s.last_bet_at)}` : '');
+
+        // Recent log
+        const logEl = document.getElementById('bot-detail-log');
+        if (s.recent_log && s.recent_log.length) {
+          logEl.innerHTML = s.recent_log.slice().reverse().map(e => {
+            const typeColor = e.type === 'AUTO_BET' ? 'text-term-green' :
+                              e.type === 'error' ? 'text-term-red' :
+                              e.type === 'scrape' ? 'text-term-cyan' : 'text-term-muted';
+            return `<div><span class="${typeColor}">[${e.type}]</span> ${e.detail} <span class="text-term-muted">${timeAgo(e.ts)}</span></div>`;
+          }).join('');
+        } else {
+          logEl.textContent = 'No activity yet';
+        }
+      } catch (e) {
+        document.getElementById('bot-label').textContent = 'Bot: error';
+      }
+    }
+
+    function toggleBotPanel() {
+      botPanelOpen = !botPanelOpen;
+      document.getElementById('bot-panel').classList.toggle('hidden', !botPanelOpen);
+      if (botPanelOpen) loadBotStatus();
+    }
 
     function isSettled(o) {
       return o.is_closed || (o.g && o.g.brackets && o.g.brackets.some(b => (b.yes_price || 0) >= 0.99));
@@ -126,6 +208,27 @@
       return `${Math.round(s/3600)}h ago`;
     }
 
+    // Phase display config
+    const PHASE_CONFIG = {
+      'AT_PEAK':     { label: 'At Peak',     color: 'bg-term-green/15 text-term-green border-term-green/30', icon: '●', sortOrder: 0 },
+      'NEAR_PEAK':   { label: 'Near Peak',   color: 'bg-term-amber/15 text-term-amber border-term-amber/30', icon: '◐', sortOrder: 1 },
+      'APPROACHING': { label: 'Approaching', color: 'bg-term-cyan/15 text-term-cyan border-term-cyan/30',   icon: '→', sortOrder: 2 },
+      'COOLING':     { label: 'Cooling',     color: 'bg-term-purple/15 text-term-purple border-term-purple/30', icon: '↓', sortOrder: 3 },
+      'UNKNOWN':     { label: 'No Data',     color: 'bg-term-surface text-term-muted border-term-border',   icon: '?', sortOrder: 4 },
+      'FUTURE':      { label: 'Future',      color: 'bg-term-surface text-term-muted border-term-border',   icon: '○', sortOrder: 5 },
+    };
+
+    function peakTimingLabel(o) {
+      if (!o.is_today) return '';
+      if (o.mean_peak_hour == null) return 'avg peak unknown';
+      const h = o.hours_to_peak;
+      const mph = o.mean_peak_hour;
+      const mphStr = `${Math.floor(mph)}:${String(Math.round((mph % 1) * 60)).padStart(2, '0')}`;
+      if (Math.abs(h) <= 1) return `at peak window (avg ${mphStr})`;
+      if (h < 0) return `${Math.abs(h).toFixed(1)}h until avg peak (${mphStr})`;
+      return `${h.toFixed(1)}h past avg peak (${mphStr})`;
+    }
+
     // ---- Render ----
 
     function render() {
@@ -135,14 +238,39 @@
       const future = filtered.filter(o => !o.is_today);
       const settledCount = opportunities.filter(isSettled).length;
 
-      let html = `<div class="text-[11px] text-term-muted mb-3">${filtered.length} of ${opportunities.length} markets (${settledCount} settled)</div>`;
+      let html = `<div class="text-[11px] text-term-muted mb-3">${filtered.length} of ${opportunities.length} markets (${settledCount} settled) — sorted by proximity to peak time</div>`;
 
       if (today.length) {
+        // Group today's opportunities by phase
+        const phaseOrder = ['AT_PEAK', 'NEAR_PEAK', 'APPROACHING', 'COOLING', 'UNKNOWN'];
+        const grouped = {};
+        phaseOrder.forEach(p => { grouped[p] = []; });
+        today.forEach(o => {
+          const phase = o.peak_phase || 'UNKNOWN';
+          if (!grouped[phase]) grouped[phase] = [];
+          grouped[phase].push(o);
+        });
+
         html += `<div class="text-term-cyan text-[11px] font-semibold uppercase tracking-wider mb-2">Today (${today.length})</div>`;
-        html += `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">`;
-        today.forEach(o => { html += renderCard(o); });
-        html += `</div>`;
+
+        // Peak timing overview bar
+        html += renderPeakTimeline(today);
+
+        phaseOrder.forEach(phase => {
+          const items = grouped[phase];
+          if (!items || !items.length) return;
+          const cfg = PHASE_CONFIG[phase];
+          html += `<div class="mb-4">`;
+          html += `<div class="flex items-center gap-2 mb-2 mt-4">`;
+          html += `<span class="phase-badge border ${cfg.color}">${cfg.icon} ${cfg.label}</span>`;
+          html += `<span class="text-term-muted text-[10px]">${items.length} ${items.length === 1 ? 'city' : 'cities'}</span>`;
+          html += `</div>`;
+          html += `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">`;
+          items.forEach(o => { html += renderCard(o); });
+          html += `</div></div>`;
+        });
       }
+
       if (future.length) {
         html += `<div class="text-term-muted text-[11px] font-semibold uppercase tracking-wider mb-2 mt-6">Future (${future.length})</div>`;
         html += `<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">`;
@@ -153,6 +281,52 @@
         html += `<div class="text-center py-12 text-term-muted text-lg">All markets settled. Click "Show settled" to view.</div>`;
       }
       container.innerHTML = html;
+    }
+
+    function renderPeakTimeline(todayOpps) {
+      // Visual timeline showing each city's position relative to their peak
+      const withPeak = todayOpps.filter(o => o.mean_peak_hour != null);
+      if (!withPeak.length) return '';
+
+      let html = `<div class="card rounded-md p-3 mb-4">`;
+      html += `<div class="text-[10px] text-term-muted uppercase tracking-wider mb-2">Peak Proximity Timeline</div>`;
+      html += `<div class="space-y-1.5">`;
+
+      withPeak.forEach(o => {
+        const h = o.hours_to_peak;
+        const proximity = o.peak_proximity;
+        // Map hours_to_peak to a position: -12h to +12h mapped to 0% to 100%
+        const pct = Math.max(2, Math.min(98, ((h + 12) / 24) * 100));
+        const cfg = PHASE_CONFIG[o.peak_phase] || PHASE_CONFIG['UNKNOWN'];
+        const dotColor = o.peak_phase === 'AT_PEAK' ? 'bg-term-green' :
+                         o.peak_phase === 'NEAR_PEAK' ? 'bg-term-amber' :
+                         o.peak_phase === 'APPROACHING' ? 'bg-term-cyan' :
+                         o.peak_phase === 'COOLING' ? 'bg-term-purple' : 'bg-term-muted';
+
+        html += `<div class="flex items-center gap-2">`;
+        html += `<span class="w-20 text-[10px] text-term-bright truncate text-right">${o.city_name}</span>`;
+        html += `<div class="flex-1 relative h-4">`;
+        // Background track
+        html += `<div class="absolute inset-y-0 inset-x-0 flex items-center"><div class="w-full h-px bg-term-border"></div></div>`;
+        // Center mark (peak time)
+        html += `<div class="absolute top-0 bottom-0 left-1/2 w-px bg-term-muted/30"></div>`;
+        // City dot at current position
+        html += `<div class="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${dotColor} shadow-sm" style="left: ${pct}%"></div>`;
+        html += `</div>`;
+        html += `<span class="w-28 text-[10px] ${h <= 0 ? 'text-term-cyan' : 'text-term-purple'}">${h <= 0 ? Math.abs(h).toFixed(1) + 'h to peak' : h.toFixed(1) + 'h past'}</span>`;
+        html += `</div>`;
+      });
+
+      html += `<div class="flex items-center gap-2 mt-1">`;
+      html += `<span class="w-20"></span>`;
+      html += `<div class="flex-1 flex justify-between text-[9px] text-term-muted">`;
+      html += `<span>-12h</span><span>-6h</span><span class="text-term-text">Peak</span><span>+6h</span><span>+12h</span>`;
+      html += `</div>`;
+      html += `<span class="w-28"></span>`;
+      html += `</div>`;
+
+      html += `</div></div>`;
+      return html;
     }
 
     function renderCard(o) {
@@ -173,6 +347,10 @@
       };
       const borderClass = actionColors[g.action] || 'border-term-border';
       const textClass = actionTextColors[g.action] || 'text-term-muted';
+
+      // Peak timing badge
+      const phaseCfg = PHASE_CONFIG[o.peak_phase] || PHASE_CONFIG['UNKNOWN'];
+      const timingLabel = peakTimingLabel(o);
 
       // WU Status
       let wuHTML = '';
@@ -285,10 +463,12 @@
               ${o.is_closed ? '<span class="px-1 py-0.5 rounded text-[9px] bg-term-red/10 text-term-red">CLOSED</span>' : ''}
             </div>
             <div class="flex items-center gap-2">
+              <span class="phase-badge border ${phaseCfg.color}">${phaseCfg.icon} ${phaseCfg.label}</span>
               ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" class="px-2 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20">PM&nearr;</a>` : ''}
-              ${o.current_hour != null ? `<span class="text-term-muted text-[10px]">${o.current_hour}:00</span>` : ''}
+              ${o.current_time ? `<span class="text-term-muted text-[10px]">Now ${o.current_time}</span>` : ''}
             </div>
           </div>
+          ${timingLabel ? `<div class="px-4 py-1.5 border-b border-term-border/50 text-[10px] ${phaseCfg.color.split(' ')[1]}">${phaseCfg.icon} ${timingLabel}</div>` : ''}
           <div class="p-4">
             ${wuHTML}
             ${confHTML}
@@ -306,11 +486,13 @@
       const g = o.g;
       if (!g) return '';
       const top = g.brackets ? g.brackets.reduce((a, b) => (b.yes_price || 0) > (a.yes_price || 0) ? b : a, g.brackets[0] || {}) : {};
+      const phaseCfg = PHASE_CONFIG[o.peak_phase] || PHASE_CONFIG['FUTURE'];
       return `
         <div class="card rounded-md relative p-3">
           <div class="flex items-center justify-between mb-1">
             <a href="/city/${encodeURIComponent(o.city_key)}" class="font-display font-semibold text-term-bright text-[12px] hover:text-term-cyan">${o.city_name}</a>
             <div class="flex items-center gap-2">
+              ${o.mean_peak_hour != null ? `<span class="text-[9px] text-term-muted">avg peak ${Math.floor(o.mean_peak_hour)}:00</span>` : ''}
               ${o.polymarket_url ? `<a href="${o.polymarket_url}" target="_blank" class="text-[9px] text-term-purple hover:text-term-bright">PM&nearr;</a>` : ''}
               <span class="text-term-muted text-[10px]">${o.date}</span>
             </div>
@@ -329,7 +511,9 @@
     }
 
     loadOpportunities();
+    loadBotStatus();
     setInterval(loadOpportunities, 60000);
+    setInterval(loadBotStatus, 15000);
   </script>
 </body>
 </html>

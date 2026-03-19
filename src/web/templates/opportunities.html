@@ -42,11 +42,36 @@
       </nav>
     </div>
     <div class="flex items-center gap-3">
+      <div id="bot-indicator" class="flex items-center gap-1.5 px-2 py-1 rounded border border-term-border text-[10px] text-term-muted cursor-pointer" onclick="toggleBotPanel()" title="Click for bot details">
+        <div id="bot-dot" class="w-1.5 h-1.5 rounded-full bg-term-muted"></div>
+        <span id="bot-label">Bot: checking...</span>
+      </div>
       <button onclick="toggleSettled()" id="filter-settled-btn" class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">Show settled</button>
       <button onclick="refreshMarkets()" id="refresh-btn" class="btn px-3 py-1.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[11px] font-medium">Refresh Markets</button>
       <button onclick="loadOpportunities()" class="btn px-3 py-1.5 rounded bg-term-surface text-term-text border border-term-border text-[11px]">Reload</button>
     </div>
   </header>
+
+  <!-- Bot status panel (hidden by default) -->
+  <div id="bot-panel" class="hidden border-b border-term-border bg-term-surface/50">
+    <div class="px-4 py-3 max-w-[1400px] mx-auto">
+      <div class="flex items-start gap-6">
+        <div>
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Auto-Bet Bot</div>
+          <div id="bot-detail-status" class="text-[11px] text-term-bright">--</div>
+          <div id="bot-detail-action" class="text-[10px] text-term-muted mt-0.5">--</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Stats</div>
+          <div id="bot-detail-stats" class="text-[10px] text-term-text">--</div>
+        </div>
+        <div class="flex-1">
+          <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Recent Activity</div>
+          <div id="bot-detail-log" class="text-[10px] text-term-muted max-h-24 overflow-y-auto space-y-0.5">--</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="status-bar" class="px-4 py-1.5 text-[10px] text-term-muted border-b border-term-border hidden">
     <span id="status-msg"></span>
@@ -61,6 +86,62 @@
   <script>
     let opportunities = [];
     let hideSettled = true;
+    let botPanelOpen = false;
+
+    // Bot status polling
+    async function loadBotStatus() {
+      try {
+        const res = await fetch('/api/bot-status');
+        const s = await res.json();
+        const dot = document.getElementById('bot-dot');
+        const label = document.getElementById('bot-label');
+
+        if (s.running) {
+          dot.className = 'w-1.5 h-1.5 rounded-full bg-term-green pulse-dot';
+          label.textContent = `Bot: ON (${s.bets_placed} bets)`;
+          label.className = 'text-term-green';
+          document.getElementById('bot-indicator').className =
+            'flex items-center gap-1.5 px-2 py-1 rounded border border-term-green/30 bg-term-green/5 text-[10px] cursor-pointer';
+        } else {
+          dot.className = 'w-1.5 h-1.5 rounded-full bg-term-red';
+          label.textContent = 'Bot: OFF';
+          label.className = 'text-term-red';
+          document.getElementById('bot-indicator').className =
+            'flex items-center gap-1.5 px-2 py-1 rounded border border-term-red/30 bg-term-red/5 text-[10px] cursor-pointer';
+        }
+
+        // Update panel details
+        const upH = Math.floor(s.uptime_seconds / 3600);
+        const upM = Math.floor((s.uptime_seconds % 3600) / 60);
+        document.getElementById('bot-detail-status').textContent =
+          s.running ? `Running for ${upH}h ${upM}m` : 'Not running';
+        document.getElementById('bot-detail-action').textContent = s.last_action || 'Idle';
+        document.getElementById('bot-detail-stats').innerHTML =
+          `Cycles: ${s.cycle_count} | Bets: ${s.bets_placed} | Cities eval'd: ${s.cities_evaluated} | Errors: ${s.errors_recent}` +
+          (s.last_bet_at ? `<br>Last bet: ${timeAgo(s.last_bet_at)}` : '');
+
+        // Recent log
+        const logEl = document.getElementById('bot-detail-log');
+        if (s.recent_log && s.recent_log.length) {
+          logEl.innerHTML = s.recent_log.slice().reverse().map(e => {
+            const typeColor = e.type === 'AUTO_BET' ? 'text-term-green' :
+                              e.type === 'error' ? 'text-term-red' :
+                              e.type === 'scrape' ? 'text-term-cyan' : 'text-term-muted';
+            return `<div><span class="${typeColor}">[${e.type}]</span> ${e.detail} <span class="text-term-muted">${timeAgo(e.ts)}</span></div>`;
+          }).join('');
+        } else {
+          logEl.textContent = 'No activity yet';
+        }
+      } catch (e) {
+        document.getElementById('bot-label').textContent = 'Bot: error';
+      }
+    }
+
+    function toggleBotPanel() {
+      botPanelOpen = !botPanelOpen;
+      document.getElementById('bot-panel').classList.toggle('hidden', !botPanelOpen);
+      if (botPanelOpen) loadBotStatus();
+    }
 
     function isSettled(o) {
       return o.is_closed || (o.g && o.g.brackets && o.g.brackets.some(b => (b.yes_price || 0) >= 0.99));
@@ -430,7 +511,9 @@
     }
 
     loadOpportunities();
+    loadBotStatus();
     setInterval(loadOpportunities, 60000);
+    setInterval(loadBotStatus, 15000);
   </script>
 </body>
 </html>

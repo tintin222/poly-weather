@@ -303,6 +303,13 @@ async def api_status():
     return {"total_bets": total, "pending_bets": pending, "observations": obs, "status": "running"}
 
 
+@app.get("/api/bot-status")
+async def api_bot_status():
+    """Return the current auto-betting bot status."""
+    from src.strategy.bot_status import bot_status
+    return bot_status.to_dict()
+
+
 @app.get("/api/bets")
 async def api_bets(limit: int = 50):
     db = get_db()

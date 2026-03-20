@@ -99,9 +99,9 @@ CITIES: dict[str, CityConfig] = {
     ),
     "Seoul": CityConfig(
         key="Seoul", display_name="Seoul",
-        lat=37.5583, lon=126.7906, unit="celsius",
+        lat=37.4691, lon=126.4505, unit="celsius",
         timezone="Asia/Seoul",
-        wu_station_id="RKSS", wu_url_path="kr/seoul/RKSS",
+        wu_station_id="RKSI", wu_url_path="kr/incheon/RKSI",
     ),
     "Tokyo": CityConfig(
         key="Tokyo", display_name="Tokyo",

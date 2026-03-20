@@ -70,8 +70,14 @@ def _strip_numeric(value: str) -> float | None:
 
 
 def _fahrenheit_to_celsius(f: float) -> float:
-    """Convert Fahrenheit to Celsius, rounded to 1 decimal."""
-    return round((f - 32) * 5 / 9, 1)
+    """Convert Fahrenheit to Celsius, rounded to nearest integer.
+
+    WU stores data in Fahrenheit internally and displays Celsius as whole
+    numbers (e.g. 91°F → 33°C, not 32.8°C). We must match this rounding
+    so our scraped values agree with what WU shows and what Polymarket
+    uses to resolve markets.
+    """
+    return round((f - 32) * 5 / 9, 0)
 
 
 def _extract_wind_direction(wind_cell: str) -> str | None:

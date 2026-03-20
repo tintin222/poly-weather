@@ -1202,33 +1202,37 @@ async def _run_backfill_all_job(job_id: str, city_keys: list[str], days: int) ->
 
 @app.post("/api/train-all-models")
 async def api_train_all_models():
-    """Train ML models for all cities that have ≥60 valid days of data."""
+    """Train ML models for all cities in a background task to avoid request timeout."""
     from src.weather.cities import CITIES
 
-    db = get_db()
-    model_repo = ModelResultRepository(db)
-    trainer = get_ml_trainer()
+    job_id = f"train-all-{str(uuid.uuid4())[:6]}"
+    _jobs[job_id] = {"status": "running", "type": "train_all", "trained": [], "skipped": [], "errors": []}
 
-    summary = {"trained": [], "skipped": [], "errors": []}
+    async def _run():
+        from src.weather.cities import CITIES as _CITIES
+        db = get_db()
+        model_repo = ModelResultRepository(db)
+        trainer = get_ml_trainer()
+        for city_key in _CITIES:
+            try:
+                results = trainer.train(city_key)
+                if not results:
+                    _jobs[job_id]["skipped"].append(city_key)
+                    continue
+                for r in results:
+                    d = r.to_dict()
+                    blob = trainer.pickle_model(city_key, r.model_name)
+                    model_repo.save_result(city_key, d, model_blob=blob)
+                best_auc = max(r.test_auc for r in results)
+                _jobs[job_id]["trained"].append({"city": city_key, "models": len(results), "best_auc": round(best_auc, 4)})
+                log.info("train_all_city_done", city=city_key, best_auc=round(best_auc, 4))
+            except Exception as exc:
+                _jobs[job_id]["errors"].append({"city": city_key, "error": str(exc)})
+                log.error("train_all_city_failed", city=city_key, error=str(exc))
+        _jobs[job_id]["status"] = "complete"
 
-    for city_key in CITIES:
-        try:
-            results = trainer.train(city_key)
-            if not results:
-                summary["skipped"].append(city_key)
-                continue
-            for r in results:
-                d = r.to_dict()
-                blob = trainer.pickle_model(city_key, r.model_name)
-                model_repo.save_result(city_key, d, model_blob=blob)
-            best_auc = max(r.test_auc for r in results)
-            summary["trained"].append({"city": city_key, "models": len(results), "best_auc": round(best_auc, 4)})
-            log.info("train_all_city_done", city=city_key, models=len(results), best_auc=round(best_auc, 4))
-        except Exception as exc:
-            summary["errors"].append({"city": city_key, "error": str(exc)})
-            log.error("train_all_city_failed", city=city_key, error=str(exc))
-
-    return summary
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
 
 
 # ---------------------------------------------------------------------------

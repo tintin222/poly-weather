@@ -415,14 +415,34 @@
         const res = await fetch('/api/train-all-models', { method: 'POST' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || res.statusText);
+        pollTrainAll(data.job_id);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Train All Models';
+        alert('Training failed: ' + e.message);
+      }
+    }
 
+    async function pollTrainAll(jobId) {
+      const btn = document.getElementById('btn-train-all');
+      try {
+        const res = await fetch(`/api/job/${jobId}`);
+        const data = await res.json();
+
+        if (data.status === 'running') {
+          const done = (data.trained || []).length + (data.skipped || []).length + (data.errors || []).length;
+          btn.textContent = `Training... (${done} done)`;
+          setTimeout(() => pollTrainAll(jobId), 2000);
+          return;
+        }
+
+        // Complete
         const resultsEl = document.getElementById('train-results');
         const summaryEl = document.getElementById('train-summary');
         const listEl = document.getElementById('train-city-list');
 
         resultsEl.classList.remove('hidden');
         summaryEl.textContent = `Trained: ${data.trained.length} cities  |  Skipped: ${data.skipped.length}  |  Errors: ${data.errors.length}`;
-
         listEl.innerHTML = data.trained.map(t => `
           <div class="card rounded px-3 py-1.5 flex items-center justify-between gap-2">
             <a href="/city/${encodeURIComponent(t.city)}" class="text-term-cyan hover:underline">${t.city}</a>
@@ -435,11 +455,12 @@
           </div>
         `).join('');
       } catch (e) {
-        alert('Training failed: ' + e.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Train All Models';
+        setTimeout(() => pollTrainAll(jobId), 3000);
+        return;
       }
+      btn.disabled = false;
+      btn.textContent = 'Train All Models';
+      loadJobs();
     }
   </script>
 </body>

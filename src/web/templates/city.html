@@ -65,6 +65,18 @@
             <span>unit: <span class="text-term-text">{{ city.unit }}</span></span>
             {% endif %}
           </div>
+          {% if city %}
+          <div class="flex items-center gap-3 mt-2">
+            <a href="https://www.wunderground.com/history/daily/{{ city.wu_url_path }}" target="_blank"
+               class="flex items-center gap-1 px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px] hover:bg-term-cyan/20">
+              <span>⛅</span> Weather Underground
+            </a>
+            <a href="https://polymarket.com/markets?q={{ city.display_name | urlencode }}&tag=temperature" target="_blank"
+               class="flex items-center gap-1 px-2 py-1 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[10px] hover:bg-term-purple/20">
+              <span>📈</span> Polymarket
+            </a>
+          </div>
+          {% endif %}
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button onclick="purgeRescrape(30)" class="btn px-3 py-1.5 rounded bg-term-red/10 text-term-red border border-term-red/20 text-[11px]" title="Delete all data and re-scrape with correct timezone">Purge & Re-scrape 30d</button>
@@ -96,13 +108,32 @@
       </div>
     </div>
 
-    <!-- Chart -->
-    <div class="card rounded-md p-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-display font-semibold text-term-bright text-sm">Daily Temperature Peaks</h3>
-        <span class="text-term-muted text-[10px]">last 30 days</span>
+    <!-- Bets -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <h3 class="font-display font-semibold text-term-bright text-sm">Bets</h3>
+        <span class="text-term-muted text-[10px]" id="bets-count">--</span>
       </div>
-      <canvas id="peaks-chart" height="80"></canvas>
+      <div class="overflow-auto max-h-[400px]">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+              <th class="px-4 py-2">Date</th>
+              <th class="px-2 py-2">Bracket</th>
+              <th class="px-2 py-2 text-right">Price</th>
+              <th class="px-2 py-2 text-right">Cost</th>
+              <th class="px-2 py-2 text-right">Conf</th>
+              <th class="px-2 py-2 text-right">EV</th>
+              <th class="px-2 py-2 text-center">Status</th>
+              <th class="px-2 py-2 text-right">P&L</th>
+              <th class="px-2 py-2">Market</th>
+            </tr>
+          </thead>
+          <tbody id="bets-tbody">
+            <tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Open-Meteo Live & Forecast -->
@@ -234,7 +265,6 @@
     let totalPages = 1;
     let filterFrom = '';
     let filterTo = '';
-    let peaksChart = null;
 
     function showStatus(msg, color='text-term-cyan') {
       const bar = document.getElementById('status-bar');
@@ -256,54 +286,39 @@
       document.getElementById('stat-max').textContent = fmt(d.max_temp);
     }
 
-    // ---- Chart ----
-    async function loadChart() {
-      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/daily-peaks?limit=30`);
+    // ---- Bets ----
+    async function loadBets() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/bets`);
       const rows = await res.json();
-      const labels = rows.map(r => r.date);
-      const data = rows.map(r => r.peak_temp);
-
-      const ctx = document.getElementById('peaks-chart').getContext('2d');
-      if (peaksChart) peaksChart.destroy();
-      peaksChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: `Peak Temp (${U})`,
-            data,
-            borderColor: '#feb019',
-            backgroundColor: 'rgba(254,176,25,0.08)',
-            pointBackgroundColor: '#feb019',
-            pointRadius: 3,
-            tension: 0.3,
-            fill: true,
-          }]
-        },
-        options: {
-          responsive: true,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              backgroundColor: '#0f1419',
-              titleColor: '#c5d4e8',
-              bodyColor: '#8b9fc0',
-              borderColor: '#1a2030',
-              borderWidth: 1,
-            },
-          },
-          scales: {
-            x: {
-              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 10 },
-              grid: { color: 'rgba(26,32,48,0.5)' },
-            },
-            y: {
-              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + U },
-              grid: { color: 'rgba(26,32,48,0.5)' },
-            },
-          },
-        }
-      });
+      document.getElementById('bets-count').textContent = `${rows.length} bets`;
+      const tbody = document.getElementById('bets-tbody');
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">No bets yet.</td></tr>';
+        return;
+      }
+      const fmt = v => v != null ? parseFloat(v).toFixed(2) : '--';
+      tbody.innerHTML = rows.map(r => {
+        const won = r.won === 1 ? 'WON' : r.won === 0 ? 'LOST' : r.event_status === 'closed' ? 'CLOSED' : 'PAPER';
+        const wonColor = r.won === 1 ? 'text-term-green bg-term-green/10 border-term-green/20'
+                       : r.won === 0 ? 'text-term-red bg-term-red/10 border-term-red/20'
+                       : 'text-term-amber bg-term-amber/10 border-term-amber/20';
+        const pnl = r.pnl != null ? (r.pnl >= 0 ? `+$${fmt(r.pnl)}` : `-$${fmt(Math.abs(r.pnl))}`) : '--';
+        const pnlColor = r.pnl > 0 ? 'text-term-green' : r.pnl < 0 ? 'text-term-red' : 'text-term-muted';
+        const polyUrl = r.slug ? `https://polymarket.com/event/${r.slug}` : null;
+        return `<tr>
+          <td class="px-4 py-1.5 text-term-bright">${r.date}</td>
+          <td class="px-2 py-1.5"><span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20">${r.bracket_label}</span></td>
+          <td class="px-2 py-1.5 text-right text-term-text">$${fmt(r.price)}</td>
+          <td class="px-2 py-1.5 text-right text-term-text">$${fmt(r.cost)}</td>
+          <td class="px-2 py-1.5 text-right text-term-amber">${r.model_confidence != null ? (r.model_confidence * 100).toFixed(0) + '%' : '--'}</td>
+          <td class="px-2 py-1.5 text-right text-term-green">${r.expected_value != null ? '+' + (r.expected_value * 100).toFixed(1) + '%' : '--'}</td>
+          <td class="px-2 py-1.5 text-center"><span class="px-1.5 py-0.5 rounded border text-[9px] ${wonColor}">${won}</span></td>
+          <td class="px-2 py-1.5 text-right font-medium ${pnlColor}">${pnl}</td>
+          <td class="px-2 py-1.5">
+            ${polyUrl ? `<a href="${polyUrl}" target="_blank" class="text-term-purple hover:underline text-[10px]">Polymarket ↗</a>` : '<span class="text-term-muted">--</span>'}
+          </td>
+        </tr>`;
+      }).join('');
     }
 
     // ---- Hourly table ----
@@ -569,7 +584,7 @@
           showStatus(`Backfill done: ${d.total_peaks} peaks`, 'text-term-green');
           setTimeout(hideStatus, 3000);
           await loadStats();
-          await loadChart();
+          await loadBets();
         } else {
           showStatus('Backfill error: ' + (d.error || 'unknown'), 'text-term-red');
         }
@@ -860,7 +875,7 @@
 
     // ---- Init ----
     loadStats();
-    loadChart();
+    loadBets();
     loadHourly(1);
     loadMLResults();
     loadOpenMeteo();

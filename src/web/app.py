@@ -1034,6 +1034,20 @@ async def city_detail_page(city_key: str, request: Request):
     })
 
 
+@app.get("/api/city/{city_key}/bets")
+async def api_city_bets(city_key: str):
+    db = get_db()
+    rows = db.conn.execute(
+        """SELECT b.*, e.slug, e.title, e.status as event_status
+           FROM bets b
+           LEFT JOIN polymarket_events e ON b.event_id = e.event_id
+           WHERE b.city_key = ?
+           ORDER BY b.date DESC, b.created_at DESC""",
+        (city_key,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.get("/api/city/{city_key}/hourly")
 async def api_city_hourly(
     city_key: str,

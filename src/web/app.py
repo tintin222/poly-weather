@@ -1288,6 +1288,57 @@ async def api_job_run(run_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Admin migrations
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/fix-celsius-rounding")
+async def api_fix_celsius_rounding():
+    """Round all stored Celsius temperatures to nearest integer.
+
+    WU displays Celsius as whole numbers (e.g. 91°F → 33°C, not 32.8°C).
+    Old scraped data was stored with 1 decimal place, causing bracket
+    mismatches. This migration rounds hourly_observations and daily_peaks
+    for all Celsius cities without re-scraping.
+    """
+    from src.weather.cities import CITIES
+    celsius_keys = [c.key for c in CITIES.values() if c.unit == "celsius"]
+    placeholders = ",".join("?" * len(celsius_keys))
+    db = get_db()
+
+    obs_result = db.conn.execute(
+        f"""UPDATE hourly_observations
+            SET temperature = ROUND(temperature),
+                dew_point = CASE WHEN dew_point IS NOT NULL THEN ROUND(dew_point) ELSE NULL END
+            WHERE city_key IN ({placeholders})""",
+        celsius_keys,
+    )
+    obs_updated = obs_result.rowcount
+
+    # Recompute peak_temp from the now-rounded hourly observations
+    peaks_result = db.conn.execute(
+        f"""UPDATE daily_peaks
+            SET peak_temp = (
+                SELECT MAX(temperature)
+                FROM hourly_observations
+                WHERE hourly_observations.city_key = daily_peaks.city_key
+                  AND hourly_observations.date = daily_peaks.date
+            )
+            WHERE city_key IN ({placeholders})""",
+        celsius_keys,
+    )
+    peaks_updated = peaks_result.rowcount
+    db.conn.commit()
+
+    log.info("celsius_rounding_fixed", obs_updated=obs_updated, peaks_updated=peaks_updated, cities=celsius_keys)
+    return {
+        "ok": True,
+        "obs_updated": obs_updated,
+        "peaks_updated": peaks_updated,
+        "cities": celsius_keys,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------
 

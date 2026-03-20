@@ -1102,6 +1102,34 @@ async def api_city_train_models(city_key: str):
     return saved
 
 
+@app.get("/api/city/{city_key}/metar")
+async def api_city_metar(city_key: str, hours: int = 24):
+    from src.weather.cities import get_city
+    from src.weather import metar
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+    try:
+        return await metar.fetch(city, hours=hours)
+    except Exception as exc:
+        log.error("metar_api_error", city=city_key, error=str(exc))
+        return {"error": str(exc)}
+
+
+@app.get("/api/city/{city_key}/open-meteo")
+async def api_city_open_meteo(city_key: str):
+    from src.weather.cities import get_city
+    from src.weather import open_meteo
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+    try:
+        return await open_meteo.fetch(city)
+    except Exception as exc:
+        log.error("open_meteo_api_error", city=city_key, error=str(exc))
+        return {"error": str(exc)}
+
+
 @app.post("/api/backfill-all")
 async def api_backfill_all(days: int = 365):
     """Trigger a 1-year backfill for ALL configured cities sequentially."""

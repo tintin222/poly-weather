@@ -53,6 +53,9 @@ class Orchestrator:
         self._max_daily_exposure = settings.max_daily_exposure
         self._min_edge = settings.min_edge
 
+        # Forecast high cache: {city_key: (date_str, forecast_high)}
+        self._forecast_cache: dict[str, tuple[str, float]] = {}
+
         self._init_paper_account()
 
     def _init_paper_account(self) -> None:
@@ -173,6 +176,24 @@ class Orchestrator:
                 log.error("evaluate_only_error", city=city.key, error=str(exc))
                 bot_status.errors_recent += 1
 
+    async def _get_forecast_high(self, city: CityConfig, today: str) -> float | None:
+        """Return today's forecast high from Open-Meteo, cached per city per day."""
+        cached = self._forecast_cache.get(city.key)
+        if cached and cached[0] == today:
+            return cached[1]
+        try:
+            from src.weather import open_meteo
+            data = await open_meteo.fetch(city)
+            today_temps = [h["temperature"] for h in data["hourly"] if h["date"] == today]
+            if today_temps:
+                high = max(today_temps)
+                self._forecast_cache[city.key] = (today, high)
+                log.info("forecast_high_cached", city=city.key, forecast_high=high)
+                return high
+        except Exception as exc:
+            log.warning("forecast_high_error", city=city.key, error=str(exc))
+        return None
+
     async def _evaluate_city(self, city: CityConfig) -> None:
         """Evaluate using peak-confidence: bet when peak has passed with high confidence."""
         today = today_in_tz(city.timezone)
@@ -187,9 +208,16 @@ class Orchestrator:
         if daily_spent >= max_daily:
             return
 
+        # FIX 1: Time gate — never bet before 11am local time.
+        # Peak temps occur between 12-16h for almost all cities; early morning
+        # observations are nighttime lows and will produce the wrong bracket.
+        if current_hour < 11:
+            log.debug("time_gate_skip", city=city.key, hour=current_hour)
+            return
+
         # Need observations
         observations = self._weather_repo.get_hourly_observations(city.key, today)
-        if not observations or len(observations) < 5:
+        if not observations or len(observations) < 8:
             return
 
         # Get current peak
@@ -253,6 +281,16 @@ class Orchestrator:
         if confidence < min_conf:
             return
 
+        # FIX 2: Forecast gate — if Open-Meteo expects the temp to climb
+        # significantly more today, the peak hasn't arrived yet.
+        forecast_high = await self._get_forecast_high(city, today)
+        if forecast_high is not None:
+            gap = forecast_high - max_temp
+            if gap > 3:
+                log.info("forecast_gate_skip", city=city.key,
+                         current_max=max_temp, forecast_high=forecast_high, gap=round(gap, 1))
+                return
+
         # Get today's events
         active_events = self._market_repo.get_active_events(today)
         city_events = [e for e in active_events if e["city_key"] == city.key]
@@ -278,8 +316,12 @@ class Orchestrator:
                 continue
 
             price = matching.get("yes_price", 0) or 0
-            if price >= 0.97 or price <= 0:
-                continue  # already settled or no liquidity
+            # FIX 3: Price floor — skip brackets priced below $0.01.
+            # Near-zero prices mean the market considers the outcome essentially
+            # impossible; our model isn't reliable enough to fight that signal,
+            # and the huge share sizes (bet_size / ~0) create phantom positions.
+            if price >= 0.97 or price < 0.01:
+                continue
 
             # Edge = confidence - market price
             edge = confidence - price
@@ -349,19 +391,12 @@ class Orchestrator:
                      edge=f"+{edge*100:.0f}%", cost=f"${cost:.2f}",
                      paper=order_result.is_paper)
 
-    @staticmethod
-    def _is_wu_scrape_time() -> bool:
-        """Check if current minute is :05 or :35."""
-        import datetime
-        minute = datetime.datetime.now().minute
-        return minute in (5, 35)
-
-    async def run_loop(self, market_interval_minutes: int = 5) -> None:
+    async def run_loop(self, market_interval_minutes: int = 5, weather_interval_minutes: int = 5) -> None:
         """Run the orchestrator in a continuous loop.
 
         - Market prices polled every ``market_interval_minutes``
         - After each market poll, re-evaluate all cities with existing weather data
-        - Weather scrape at :05 and :35 past each hour (full scrape + evaluate)
+        - Weather scrape every ``weather_interval_minutes``
         """
         bot_status.running = True
         bot_status.started_at = time.time()
@@ -370,17 +405,15 @@ class Orchestrator:
 
         log.info("orchestrator_started",
                  market_interval=market_interval_minutes,
-                 weather_schedule="every :05 and :35",
+                 weather_interval=weather_interval_minutes,
                  paper_mode=self._settings.paper_mode)
 
         last_market_poll = 0
-        last_weather_minute = -1
+        last_weather_scrape = 0
 
         while True:
             try:
                 now = time.time()
-                import datetime
-                current_minute = datetime.datetime.now().minute
 
                 # Poll market prices and evaluate on every interval
                 if now - last_market_poll >= market_interval_minutes * 60:
@@ -402,12 +435,12 @@ class Orchestrator:
                     bot_status.cycle_count += 1
                     bot_status.last_cycle_at = time.time()
 
-                # Full scrape + evaluate at :05 and :35
-                if self._is_wu_scrape_time() and current_minute != last_weather_minute:
-                    last_weather_minute = current_minute
-                    log.info("wu_scrape_triggered", minute=current_minute)
+                # Full scrape + evaluate every weather_interval_minutes
+                if now - last_weather_scrape >= weather_interval_minutes * 60:
+                    last_weather_scrape = now
+                    log.info("wu_scrape_triggered", interval_minutes=weather_interval_minutes)
                     bot_status.last_action = "Scraping weather data"
-                    bot_status.log_event("scrape", f"Weather scrape triggered at :{current_minute:02d}")
+                    bot_status.log_event("scrape", "Weather scrape triggered")
 
                     cities_today = self._get_todays_cities()
                     if cities_today:

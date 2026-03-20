@@ -105,6 +105,61 @@
       <canvas id="peaks-chart" height="80"></canvas>
     </div>
 
+    <!-- Open-Meteo Live & Forecast -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <h3 class="font-display font-semibold text-term-bright text-sm">Open-Meteo Live & Forecast</h3>
+          <span class="text-[10px] text-term-muted" id="om-fetched-at"></span>
+        </div>
+        <button onclick="loadOpenMeteo()" class="btn px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Refresh</button>
+      </div>
+
+      <!-- Current conditions strip -->
+      <div class="px-4 pt-3 pb-2" id="om-current-strip">
+        <div class="text-term-muted text-center py-4 text-[11px]">Loading...</div>
+      </div>
+
+      <!-- Chart: actual (solid) + forecast (dashed) -->
+      <div class="px-4 pb-3">
+        <div class="flex items-center gap-4 text-[10px] text-term-muted mb-2">
+          <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-cyan"></span> OM Actual</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 border-t-2 border-dashed border-term-purple"></span> OM Forecast</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-amber"></span> WU Actual</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-green"></span> METAR (ASOS)</span>
+        </div>
+        <canvas id="om-chart" height="70"></canvas>
+      </div>
+
+      <!-- Source correlation strip -->
+      <div class="px-4 pb-3" id="om-correlation" style="display:none">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-2">Source Correlation — Today's Overlap Hours</div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2" id="om-corr-cards"></div>
+      </div>
+
+      <!-- Hourly table -->
+      <div class="border-t border-term-border overflow-auto max-h-[320px]">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+              <th class="px-4 py-2">Date</th>
+              <th class="px-2 py-2">Hour</th>
+              <th class="px-2 py-2 text-right">Temp</th>
+              <th class="px-2 py-2 text-right">Feels Like</th>
+              <th class="px-2 py-2 text-right">Humidity</th>
+              <th class="px-2 py-2 text-right">Wind</th>
+              <th class="px-2 py-2 text-right">Precip</th>
+              <th class="px-2 py-2">Condition</th>
+              <th class="px-2 py-2 text-center">Source</th>
+            </tr>
+          </thead>
+          <tbody id="om-tbody">
+            <tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Hourly data table -->
     <div class="card rounded-md">
       <div class="px-4 py-2.5 border-b border-term-border">
@@ -522,11 +577,293 @@
       setTimeout(poll, 2000);
     }
 
+    // ---- Source correlation ----
+    function corrStats(a, b) {
+      // Only use hours where both sources have a value
+      const pairs = a.map((v, i) => [v, b[i]]).filter(([x, y]) => x != null && y != null);
+      if (pairs.length < 2) return null;
+      const diffs = pairs.map(([x, y]) => Math.abs(x - y));
+      const meanDiff = diffs.reduce((s, d) => s + d, 0) / diffs.length;
+      const maxDiff = Math.max(...diffs);
+      // Pearson correlation
+      const n = pairs.length;
+      const meanA = pairs.reduce((s, [x]) => s + x, 0) / n;
+      const meanB = pairs.reduce((s, [, y]) => s + y, 0) / n;
+      const num = pairs.reduce((s, [x, y]) => s + (x - meanA) * (y - meanB), 0);
+      const den = Math.sqrt(
+        pairs.reduce((s, [x]) => s + (x - meanA) ** 2, 0) *
+        pairs.reduce((s, [, y]) => s + (y - meanB) ** 2, 0)
+      );
+      const r = den === 0 ? 1 : num / den;
+      return { meanDiff, maxDiff, r, n: pairs.length };
+    }
+
+    function renderCorrelation(pairs) {
+      const container = document.getElementById('om-correlation');
+      const cards = document.getElementById('om-corr-cards');
+      const html = pairs.map(({ labelA, dataA, colorA, labelB, dataB, colorB }) => {
+        const s = corrStats(dataA, dataB);
+        if (!s) return `
+          <div class="card rounded p-3 text-[10px]">
+            <div class="flex items-center gap-1 mb-2">
+              <span style="color:${colorA}" class="font-bold">${labelA}</span>
+              <span class="text-term-muted">vs</span>
+              <span style="color:${colorB}" class="font-bold">${labelB}</span>
+            </div>
+            <div class="text-term-muted">Not enough overlap</div>
+          </div>`;
+        const diffColor = s.meanDiff < 0.5 ? '#00e396' : s.meanDiff < 1.5 ? '#feb019' : '#ff4560';
+        const rColor = s.r > 0.98 ? '#00e396' : s.r > 0.90 ? '#feb019' : '#ff4560';
+        return `
+          <div class="card rounded p-3 text-[10px]">
+            <div class="flex items-center gap-1 mb-2">
+              <span style="color:${colorA}" class="font-bold">${labelA}</span>
+              <span class="text-term-muted">vs</span>
+              <span style="color:${colorB}" class="font-bold">${labelB}</span>
+              <span class="text-term-muted ml-auto">${s.n} hrs</span>
+            </div>
+            <div class="grid grid-cols-3 gap-1 text-center">
+              <div>
+                <div class="text-term-muted text-[9px] uppercase mb-0.5">Avg Diff</div>
+                <div class="font-bold font-display" style="color:${diffColor}">${s.meanDiff.toFixed(2)}${U}</div>
+              </div>
+              <div>
+                <div class="text-term-muted text-[9px] uppercase mb-0.5">Max Diff</div>
+                <div class="font-bold font-display text-term-text">${s.maxDiff.toFixed(2)}${U}</div>
+              </div>
+              <div>
+                <div class="text-term-muted text-[9px] uppercase mb-0.5">Correlation</div>
+                <div class="font-bold font-display" style="color:${rColor}">${s.r.toFixed(3)}</div>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+      cards.innerHTML = html;
+      container.style.display = 'block';
+    }
+
+    // ---- Open-Meteo ----
+    let omChart = null;
+
+    async function loadOpenMeteo() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/open-meteo`);
+      const d = await res.json();
+      if (d.error) {
+        document.getElementById('om-current-strip').innerHTML =
+          `<div class="text-term-red text-center py-4 text-[11px]">Error: ${d.error}</div>`;
+        return;
+      }
+
+      // Fetched-at timestamp
+      const fetchedAt = new Date(d.fetched_at);
+      document.getElementById('om-fetched-at').textContent =
+        `updated ${fetchedAt.toLocaleTimeString()}`;
+
+      // Current conditions
+      const c = d.current;
+      const fmt1 = v => v != null ? parseFloat(v).toFixed(1) : '--';
+      document.getElementById('om-current-strip').innerHTML = `
+        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 text-[11px]">
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Now</div>
+            <div class="text-lg font-bold text-term-cyan font-display">${fmt1(c.temperature)}${U}</div>
+            <div class="text-term-muted text-[9px]">${c.condition}</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Feels Like</div>
+            <div class="text-base font-bold text-term-text font-display">${fmt1(c.feels_like)}${U}</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Humidity</div>
+            <div class="text-base font-bold text-term-text font-display">${fmt1(c.humidity)}%</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Wind</div>
+            <div class="text-base font-bold text-term-text font-display">${fmt1(c.wind_speed)}</div>
+            <div class="text-term-muted text-[9px]">${d.unit === 'fahrenheit' ? 'mph' : 'km/h'} · ${c.wind_direction}°</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Pressure</div>
+            <div class="text-base font-bold text-term-text font-display">${fmt1(c.pressure)}</div>
+            <div class="text-term-muted text-[9px]">hPa</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">Precip</div>
+            <div class="text-base font-bold text-term-text font-display">${fmt1(c.precipitation)}</div>
+            <div class="text-term-muted text-[9px]">mm</div>
+          </div>
+          <div class="card rounded p-2 text-center">
+            <div class="text-term-muted text-[9px] uppercase tracking-wider mb-1">As of</div>
+            <div class="text-base font-bold text-term-text font-display" style="font-size:10px">${c.time.split('T')[1]}</div>
+            <div class="text-term-muted text-[9px]">${c.time.split('T')[0]}</div>
+          </div>
+        </div>`;
+
+      // Chart — fetch WU data for today alongside OM data
+      const today = c.time.split('T')[0];
+      const todayRows = d.hourly.filter(h => h.date === today);
+      const actualRows = todayRows.filter(h => !h.is_forecast);
+      const forecastRows = todayRows.filter(h => h.is_forecast);
+
+      // Fetch today's WU observations
+      let wuRows = [];
+      try {
+        const wuRes = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/hourly?date_from=${today}&date_to=${today}&page_size=24`);
+        const wuData = await wuRes.json();
+        wuRows = wuData.rows || [];
+      } catch (_) {}
+
+      // Fetch METAR observations
+      let metarRows = [];
+      try {
+        const metarRes = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/metar?hours=24`);
+        const metarData = await metarRes.json();
+        metarRows = (metarData.observations || []).filter(r => r.date === today);
+      } catch (_) {}
+
+      // Build full 0-23 label set for today
+      const allHours = Array.from({length: 24}, (_, i) => `${String(i).padStart(2,'0')}:00`);
+      const actualData = allHours.map(label => {
+        const row = actualRows.find(r => `${String(r.hour).padStart(2,'0')}:00` === label);
+        return row ? row.temperature : null;
+      });
+      const forecastData = allHours.map(label => {
+        const row = forecastRows.find(r => `${String(r.hour).padStart(2,'0')}:00` === label);
+        return row ? row.temperature : null;
+      });
+      const wuData = allHours.map((_, i) => {
+        const row = wuRows.find(r => r.hour === i);
+        return row ? row.temperature : null;
+      });
+      const metarData = allHours.map((_, i) => {
+        const row = metarRows.find(r => r.hour === i);
+        return row ? row.temperature : null;
+      });
+
+      const ctx = document.getElementById('om-chart').getContext('2d');
+      if (omChart) omChart.destroy();
+      omChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: allHours,
+          datasets: [
+            {
+              label: `OM Actual (${U})`,
+              data: actualData,
+              borderColor: '#00c8ff',
+              backgroundColor: 'rgba(0,200,255,0.05)',
+              pointBackgroundColor: '#00c8ff',
+              pointRadius: 3,
+              tension: 0.3,
+              fill: true,
+              spanGaps: false,
+            },
+            {
+              label: `OM Forecast (${U})`,
+              data: forecastData,
+              borderColor: '#775dd0',
+              backgroundColor: 'rgba(119,93,208,0.04)',
+              pointBackgroundColor: '#775dd0',
+              pointRadius: 3,
+              borderDash: [5, 4],
+              tension: 0.3,
+              fill: false,
+              spanGaps: false,
+            },
+            {
+              label: `WU Actual (${U})`,
+              data: wuData,
+              borderColor: '#feb019',
+              backgroundColor: 'rgba(254,176,25,0.0)',
+              pointBackgroundColor: '#feb019',
+              pointStyle: 'rectRot',
+              pointRadius: 4,
+              borderWidth: 2,
+              tension: 0.3,
+              fill: false,
+              spanGaps: false,
+            },
+            {
+              label: `METAR ASOS (${U})`,
+              data: metarData,
+              borderColor: '#00e396',
+              backgroundColor: 'rgba(0,227,150,0.0)',
+              pointBackgroundColor: '#00e396',
+              pointStyle: 'triangle',
+              pointRadius: 4,
+              borderWidth: 2,
+              tension: 0.3,
+              fill: false,
+              spanGaps: false,
+            },
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: {
+              display: true,
+              labels: { color: '#8b9fc0', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 16 }
+            },
+            tooltip: {
+              backgroundColor: '#0f1419', titleColor: '#c5d4e8',
+              bodyColor: '#8b9fc0', borderColor: '#1a2030', borderWidth: 1,
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 12 },
+              grid: { color: 'rgba(26,32,48,0.5)' },
+            },
+            y: {
+              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 10 }, callback: v => v + U },
+              grid: { color: 'rgba(26,32,48,0.5)' },
+            },
+          },
+        }
+      });
+
+      // Source correlation
+      renderCorrelation([
+        { labelA: 'WU', dataA: wuData, colorA: '#feb019', labelB: 'METAR', dataB: metarData, colorB: '#00e396' },
+        { labelA: 'OM', dataA: actualData, colorA: '#00c8ff', labelB: 'METAR', dataB: metarData, colorB: '#00e396' },
+        { labelA: 'OM', dataA: actualData, colorA: '#00c8ff', labelB: 'WU', dataB: wuData, colorB: '#feb019' },
+      ]);
+
+      // Table: today's rows only, forecast rows dimmed
+      const tbody = document.getElementById('om-tbody');
+      if (!todayRows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">No data.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = todayRows.map(r => {
+        const fc = r.is_forecast;
+        const cls = fc ? 'text-term-muted italic' : 'text-term-text';
+        const tempCls = fc ? 'text-term-purple' : 'text-term-cyan';
+        return `<tr class="${fc ? 'opacity-60' : ''}">
+          <td class="px-4 py-1 ${cls}">${r.date}</td>
+          <td class="px-2 py-1 ${cls}">${String(r.hour).padStart(2,'0')}:00</td>
+          <td class="px-2 py-1 text-right font-medium ${tempCls}">${fmt1(r.temperature)}${U}</td>
+          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.feels_like)}${U}</td>
+          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.humidity)}%</td>
+          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.wind_speed)} ${d.unit === 'fahrenheit' ? 'mph' : 'km/h'}</td>
+          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.precipitation)}mm</td>
+          <td class="px-2 py-1 ${cls} truncate max-w-[120px]">${r.condition}</td>
+          <td class="px-2 py-1 text-center">
+            ${fc
+              ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20">forecast</span>'
+              : '<span class="px-1.5 py-0.5 rounded text-[9px] bg-term-cyan/10 text-term-cyan border border-term-cyan/20">actual</span>'}
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
     // ---- Init ----
     loadStats();
     loadChart();
     loadHourly(1);
     loadMLResults();
+    loadOpenMeteo();
   </script>
 </body>
 </html>

@@ -151,12 +151,6 @@ CITIES: dict[str, CityConfig] = {
         timezone="Asia/Kolkata",
         wu_station_id="VILK", wu_url_path="in/lucknow/VILK",
     ),
-    "Auckland": CityConfig(
-        key="Auckland", display_name="Auckland",
-        lat=-37.0082, lon=174.7850, unit="celsius",
-        timezone="Pacific/Auckland",
-        wu_station_id="NZAA", wu_url_path="nz/auckland/NZAA",
-    ),
 }
 
 

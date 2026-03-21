@@ -131,19 +131,25 @@ class WeatherRepository:
     def upsert_daily_peak(
         self, city_key: str, date: str, peak_temp: float,
         peak_hour: int, observation_count: int,
+        summary_high_temp: float | None = None,
     ) -> None:
+        # Only overwrite summary_high_temp when a non-NULL value is provided,
+        # so re-runs without summary data don't erase an existing good value.
         self._db.conn.execute(
             """INSERT INTO daily_peaks
-               (city_key, date, peak_temp, peak_hour, observation_count, computed_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (city_key, date, peak_temp, peak_hour, observation_count, summary_high_temp, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(city_key, date)
                DO UPDATE SET
                  peak_temp = excluded.peak_temp,
                  peak_hour = excluded.peak_hour,
                  observation_count = excluded.observation_count,
+                 summary_high_temp = CASE WHEN excluded.summary_high_temp IS NOT NULL
+                                          THEN excluded.summary_high_temp
+                                          ELSE daily_peaks.summary_high_temp END,
                  computed_at = excluded.computed_at
             """,
-            (city_key, date, peak_temp, peak_hour, observation_count, int(time.time())),
+            (city_key, date, peak_temp, peak_hour, observation_count, summary_high_temp, int(time.time())),
         )
         self._db.conn.commit()
 
@@ -186,7 +192,6 @@ class WeatherRepository:
         row = self._db.conn.execute(
             """SELECT
                 COUNT(*) as total_rows,
-                AVG(temperature) as avg_temp,
                 MIN(temperature) as min_temp,
                 MAX(temperature) as max_temp,
                 MIN(date) as min_date,
@@ -194,7 +199,16 @@ class WeatherRepository:
                FROM hourly_observations WHERE city_key = ?""",
             (city_key,),
         ).fetchone()
-        return dict(row) if row else {}
+        result = dict(row) if row else {}
+        peak_row = self._db.conn.execute(
+            """SELECT AVG(peak_hour) as avg_peak_hour, AVG(peak_temp) as avg_peak_temp
+               FROM daily_peaks WHERE city_key = ? AND peak_hour > 0""",
+            (city_key,),
+        ).fetchone()
+        if peak_row:
+            result["avg_peak_hour"] = peak_row["avg_peak_hour"]
+            result["avg_peak_temp"] = peak_row["avg_peak_temp"]
+        return result
 
     def get_recent_daily_peaks(self, city_key: str, limit: int = 30) -> list[sqlite3.Row]:
         return self._db.conn.execute(

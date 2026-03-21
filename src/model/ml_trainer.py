@@ -21,21 +21,18 @@ Training design
 5. Per-date summary: for each test day, which hour did the model assign
    the highest probability to?  Was it correct?
 
-Features (13, down from 18)
----------------------------
-Dropped (redundant or causally weak):
-  - month_sin / month_cos  → redundant with doy_sin/cos
-  - day_of_week            → no causal link to temperature peak timing
-  - morning_humidity       → derived from morning_temp + morning_dew (RH formula)
-  - obs_count              → redundant with current_hour_sin/cos
-
-Kept (causal or informative):
+Features (17)
+-------------
   doy_sin, doy_cos           — seasonal cycle
   morning_temp               — daytime max correlates with morning temp
   morning_dew                — atmospheric moisture → cloud formation timing
   morning_wind               — mixing affects peak timing
   morning_pressure           — synoptic situation
+  morning_humidity           — cloud cover / moisture directly affects peak timing
   rolling_peak_hour_7d       — climatological baseline for this city
+  peak_hour_yesterday        — yesterday's actual peak (strongest short-term signal)
+  peak_hour_2d_ago           — 2-day-ago peak (stable weather = consistent peaks)
+  peak_hour_trend_3d         — is the peak shifting earlier or later this week?
   current_hour_sin/cos       — cyclical time-of-day (critical for classification)
   current_max_temp           — how high has it gotten so far
   current_max_hour           — when was the running max (is peak receding?)
@@ -76,7 +73,9 @@ WARN_VALID_DAYS = 120   # warn; suggest more backfill below this
 FEATURE_NAMES = [
     "doy_sin", "doy_cos",
     "morning_temp", "morning_dew", "morning_wind", "morning_pressure",
+    "morning_humidity",
     "rolling_peak_hour_7d",
+    "peak_hour_yesterday", "peak_hour_2d_ago", "peak_hour_trend_3d",
     "current_hour_sin", "current_hour_cos",
     "current_max_temp", "current_max_hour",
     "hours_since_obs_peak", "temp_trend_2h",
@@ -134,8 +133,20 @@ class MLTrainer:
     # Dataset building
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _day_of_year(date_str: str) -> int:
+        import datetime as _dt
+        y, m, d = int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10])
+        return _dt.date(y, m, d).timetuple().tm_yday
+
+    @staticmethod
+    def _circular_day_distance(doy1: int, doy2: int, year_days: int = 365) -> int:
+        """Minimum circular distance between two days-of-year."""
+        diff = abs(doy1 - doy2) % year_days
+        return min(diff, year_days - diff)
+
     def _build_dataset(
-        self, city_key: str
+        self, city_key: str, target_date: str | None = None
     ) -> tuple[list[dict], np.ndarray, np.ndarray, dict[str, int]] | None:
         """Build (metadata_list, X, y, peak_by_date).
 
@@ -143,6 +154,10 @@ class MLTrainer:
         Each remaining day is expanded into up to 15 rows (one per PREDICTION_HOUR).
         metadata_list entries: {date, pred_hour}.
         peak_by_date: {date -> actual_peak_hour} for the full dataset.
+
+        If target_date is given, filters to ±45 days around that calendar date
+        (falling back to ±90 days, then full dataset) to avoid training on
+        off-season patterns that don't apply to the target date.
         """
         import datetime as _dt
 
@@ -152,14 +167,37 @@ class MLTrainer:
         ).fetchall()
 
         # --- Filter artifact rows (peak at midnight = scraper captured no daytime data) ---
-        peaks_rows = [r for r in all_peaks if r["peak_hour"] > 0]
-        n_filtered = len(all_peaks) - len(peaks_rows)
+        all_valid = [r for r in all_peaks if r["peak_hour"] > 0]
+        n_filtered = len(all_peaks) - len(all_valid)
+
+        # --- Seasonal filtering: prefer data near target_date calendar position ---
+        peaks_rows = all_valid
+        seasonal_window = None
+        if target_date:
+            try:
+                target_doy = self._day_of_year(target_date)
+                for window in (45, 90):
+                    filtered = [
+                        r for r in all_valid
+                        if self._circular_day_distance(self._day_of_year(r["date"]), target_doy) <= window
+                    ]
+                    if len(filtered) >= MIN_VALID_DAYS:
+                        peaks_rows = filtered
+                        seasonal_window = window
+                        break
+                else:
+                    peaks_rows = all_valid  # fall back to full dataset
+                    seasonal_window = None
+            except (ValueError, IndexError):
+                pass
 
         log.info(
             "ml_build_dataset",
             city=city_key,
             total_peaks=len(all_peaks),
-            valid_peaks=len(peaks_rows),
+            valid_peaks=len(all_valid),
+            seasonal_window=seasonal_window,
+            after_seasonal_filter=len(peaks_rows),
             filtered_zero=n_filtered,
         )
 
@@ -184,7 +222,7 @@ class MLTrainer:
         peak_by_date = {r["date"]: r["peak_hour"] for r in peaks_rows}
 
         obs_rows = self._db.conn.execute(
-            """SELECT date, hour, temperature, dew_point, wind_speed, pressure
+            """SELECT date, hour, temperature, dew_point, humidity, wind_speed, pressure
                FROM hourly_observations WHERE city_key = ? ORDER BY date, hour""",
             (city_key,),
         ).fetchall()
@@ -229,14 +267,24 @@ class MLTrainer:
             if not morning:
                 continue   # no morning baseline → features meaningless
 
-            morning_temp = _avg("temperature", morning)
-            morning_dew  = _avg("dew_point", morning)
-            morning_wind = _avg("wind_speed", morning)
-            morning_pres = _avg("pressure", morning)
+            morning_temp     = _avg("temperature", morning)
+            morning_dew      = _avg("dew_point", morning)
+            morning_wind     = _avg("wind_speed", morning)
+            morning_pres     = _avg("pressure", morning)
+            morning_humidity = _avg("humidity", morning)
 
             # --- Rolling 7-day avg peak_hour (climatological baseline) ---
             past = peak_hours_seq[max(0, i - 7):i]
             rolling_peak_hour = float(np.mean(past)) if past else 14.0
+
+            # --- Recent peak hours: yesterday, 2 days ago, 3-day trend ---
+            peak_hour_yesterday = float(peak_hours_seq[i - 1]) if i >= 1 else 14.0
+            peak_hour_2d_ago    = float(peak_hours_seq[i - 2]) if i >= 2 else 14.0
+            # Positive = peak shifting later; negative = shifting earlier
+            if i >= 3:
+                peak_hour_trend_3d = float(peak_hours_seq[i - 1] - peak_hours_seq[i - 3]) / 2.0
+            else:
+                peak_hour_trend_3d = 0.0
 
             # --- Per prediction-hour rows ---
             for pred_hour in PREDICTION_HOURS:
@@ -269,7 +317,9 @@ class MLTrainer:
                 features = [
                     doy_sin, doy_cos,
                     morning_temp, morning_dew, morning_wind, morning_pres,
+                    morning_humidity,
                     rolling_peak_hour,
+                    peak_hour_yesterday, peak_hour_2d_ago, peak_hour_trend_3d,
                     hour_sin, hour_cos,
                     current_max_temp, float(current_max_hour),
                     hours_since_obs_peak, trend,
@@ -304,8 +354,14 @@ class MLTrainer:
     # Training
     # ------------------------------------------------------------------
 
-    def train(self, city_key: str) -> list[MLModelResult]:
-        """Train binary classifiers. Results cached in memory."""
+    def train(self, city_key: str, target_date: str | None = None) -> list[MLModelResult]:
+        """Train binary classifiers. Results cached in memory.
+
+        Args:
+            city_key: City identifier.
+            target_date: If provided, filter training data to ±45 days around this
+                calendar date to avoid training on off-season patterns.
+        """
         from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
         from sklearn.linear_model import LogisticRegression
         from sklearn.metrics import (
@@ -316,7 +372,7 @@ class MLTrainer:
         )
         from sklearn.utils.class_weight import compute_sample_weight
 
-        dataset = self._build_dataset(city_key)
+        dataset = self._build_dataset(city_key, target_date=target_date)
         if dataset is None:
             return []
 
@@ -511,19 +567,25 @@ class MLTrainer:
         today_obs: list,
         rolling_peak_hour: float = 14.0,
         day_of_year: int = 180,
+        peak_hour_yesterday: float = 14.0,
+        peak_hour_2d_ago: float = 14.0,
+        peak_hour_trend_3d: float = 0.0,
     ) -> float | None:
         """Return P(current_hour is today's peak hour) using the best cached model.
 
         Returns None if no model is loaded for the city.
 
         Args:
-            city_key:           City identifier.
-            current_hour:       Current hour (0-23).
-            today_obs:          List of hourly observation dicts for today so far
-                                (each must have: hour, temperature, dew_point,
-                                 wind_speed, pressure).
-            rolling_peak_hour:  7-day rolling avg peak hour (default 14 if unknown).
-            day_of_year:        Day of year (1-365).
+            city_key:              City identifier.
+            current_hour:          Current hour (0-23).
+            today_obs:             List of hourly observation dicts for today so far
+                                   (each must have: hour, temperature, dew_point,
+                                    humidity, wind_speed, pressure).
+            rolling_peak_hour:     7-day rolling avg peak hour (default 14 if unknown).
+            day_of_year:           Day of year (1-365).
+            peak_hour_yesterday:   Actual peak hour from yesterday.
+            peak_hour_2d_ago:      Actual peak hour from 2 days ago.
+            peak_hour_trend_3d:    Slope of peak hour over last 3 days (positive = shifting later).
         """
         # Ensure model is available in memory
         city_models = self._models.get(city_key)
@@ -562,10 +624,11 @@ class MLTrainer:
             vals = [o[col] for o in obs_list if o.get(col) is not None]
             return float(np.mean(vals)) if vals else 0.0
 
-        morning_temp = _avg("temperature", morning)
-        morning_dew  = _avg("dew_point", morning)
-        morning_wind = _avg("wind_speed", morning)
-        morning_pres = _avg("pressure", morning)
+        morning_temp     = _avg("temperature", morning)
+        morning_dew      = _avg("dew_point", morning)
+        morning_wind     = _avg("wind_speed", morning)
+        morning_pres     = _avg("pressure", morning)
+        morning_humidity = _avg("humidity", morning)
 
         doy_sin = math.sin(2 * math.pi * day_of_year / 365.0)
         doy_cos = math.cos(2 * math.pi * day_of_year / 365.0)
@@ -591,7 +654,9 @@ class MLTrainer:
         X = np.array([[
             doy_sin, doy_cos,
             morning_temp, morning_dew, morning_wind, morning_pres,
+            morning_humidity,
             rolling_peak_hour,
+            peak_hour_yesterday, peak_hour_2d_ago, peak_hour_trend_3d,
             hour_sin, hour_cos,
             current_max_temp, float(current_max_hour),
             hours_since_obs_peak, trend,

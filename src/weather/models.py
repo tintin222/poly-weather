@@ -33,3 +33,23 @@ class DailyPeak(BaseModel):
     peak_temp: float
     peak_hour: int = Field(ge=0, le=23)
     observation_count: int = Field(ge=0)
+
+
+class DailyScrapeResult:
+    """Result of a single-day WU scrape: hourly observations + summary high temp.
+
+    summary_high_temp comes from the WU Summary Table "High Temp (Actual)" row,
+    which aggregates ALL station readings (including ASOS reports not in the
+    hourly table). This is the value Polymarket uses for resolution.
+    It may be higher than max(observations.temperature).
+    """
+
+    __slots__ = ("observations", "summary_high_temp")
+
+    def __init__(
+        self,
+        observations: list[HourlyObservation],
+        summary_high_temp: float | None,
+    ) -> None:
+        self.observations = observations
+        self.summary_high_temp = summary_high_temp

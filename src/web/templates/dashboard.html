@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>poly-weather // paper trading terminal</title>
+  <title>poly-weather // dashboard</title>
   <meta http-equiv="refresh" content="60">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -36,117 +36,55 @@
     }
   </script>
   <style>
-    body {
-      background: #0a0e14;
-      font-family: 'JetBrains Mono', monospace;
-    }
-
-    /* Scan-line overlay */
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
     body::after {
       content: '';
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: 9999;
-      background: repeating-linear-gradient(
-        0deg,
-        transparent,
-        transparent 2px,
-        rgba(0, 0, 0, 0.03) 2px,
-        rgba(0, 0, 0, 0.03) 4px
-      );
+      position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
     }
-
-    /* Glow effects */
-    .glow-green { text-shadow: 0 0 20px rgba(0, 227, 150, 0.3); }
-    .glow-red { text-shadow: 0 0 20px rgba(255, 69, 96, 0.3); }
-    .glow-cyan { text-shadow: 0 0 20px rgba(0, 200, 255, 0.3); }
-
+    .glow-green { text-shadow: 0 0 20px rgba(0,227,150,0.3); }
+    .glow-red   { text-shadow: 0 0 20px rgba(255,69,96,0.3); }
+    .glow-cyan  { text-shadow: 0 0 20px rgba(0,200,255,0.3); }
     .card {
-      background: #0f1419;
-      border: 1px solid #1a2030;
-      position: relative;
-      overflow: hidden;
+      background: #0f1419; border: 1px solid #1a2030;
+      position: relative; overflow: hidden;
     }
     .card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(0, 200, 255, 0.2), transparent);
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,200,255,0.2), transparent);
     }
-
     .stat-card {
       background: linear-gradient(135deg, #0f1419 0%, #111820 100%);
-      border: 1px solid #1a2030;
-      position: relative;
+      border: 1px solid #1a2030; position: relative;
     }
     .stat-card::after {
-      content: '';
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      width: var(--fill, 0%);
-      height: 2px;
-      background: var(--accent, #00c8ff);
-      transition: width 1s ease;
+      content: ''; position: absolute; bottom: 0; left: 0;
+      width: var(--fill, 0%); height: 2px;
+      background: var(--accent, #00c8ff); transition: width 1s ease;
     }
-
-    /* Table styling */
     table { border-collapse: separate; border-spacing: 0; }
     thead th {
-      background: #111820;
-      position: sticky;
-      top: 0;
-      z-index: 10;
+      background: #111820; position: sticky; top: 0; z-index: 10;
       border-bottom: 1px solid #1a2030;
     }
-    tbody tr {
-      transition: background 0.15s;
-    }
-    tbody tr:hover {
-      background: rgba(0, 200, 255, 0.03);
-    }
-    tbody td {
-      border-bottom: 1px solid rgba(26, 32, 48, 0.5);
-    }
-
-    /* Pulse animation for live badge */
-    @keyframes pulse-dot {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
-    }
-    .pulse-dot {
-      animation: pulse-dot 2s ease-in-out infinite;
-    }
-
-    /* Fade-in animation */
-    @keyframes slideUp {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .animate-in {
-      animation: slideUp 0.4s ease forwards;
-      opacity: 0;
-    }
-
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
-    ::-webkit-scrollbar-track { background: #0a0e14; }
-    ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3d4f6a; }
-
-    .noise-bg {
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
-    }
+    tbody tr { transition: background 0.15s; }
+    tbody tr:hover { background: rgba(0,200,255,0.03); }
+    tbody td { border-bottom: 1px solid rgba(26,32,48,0.5); }
+    @keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes slideUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .animate-in { animation: slideUp 0.4s ease forwards; opacity:0; }
+    ::-webkit-scrollbar { width:4px; height:4px; }
+    ::-webkit-scrollbar-track { background:#0a0e14; }
+    ::-webkit-scrollbar-thumb { background:#1a2030; border-radius:2px; }
+    ::-webkit-scrollbar-thumb:hover { background:#3d4f6a; }
+    .noise-bg { background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E"); }
   </style>
 </head>
 <body class="noise-bg text-term-text text-xs min-h-screen">
 
   <!-- Header -->
-  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between animate-in" style="animation-delay: 0s">
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between animate-in" style="animation-delay:0s">
     <div class="flex items-center gap-4">
       <div class="flex items-center gap-2">
         <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
@@ -155,8 +93,10 @@
       <nav class="flex gap-3 text-[11px]">
         <a href="/" class="text-term-cyan">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-muted hover:text-term-text">URLs</a>
       </nav>
       <span class="px-2 py-0.5 rounded text-[10px] font-semibold tracking-wider uppercase
         {% if paper_bets > 0 %}bg-term-amber/10 text-term-amber border border-term-amber/20
@@ -165,22 +105,15 @@
       </span>
     </div>
     <div class="flex items-center gap-4 text-term-muted">
-      <span>refresh: 60s</span>
-      <span class="text-term-text">{{ observation_count|default(0) }} obs</span>
-      <span class="text-term-text">{{ cities_with_data|default(0) }} cities</span>
+      <span>{{ cities_with_data }} cities · {{ "{:,}".format(observation_count) }} obs</span>
+      <span>refresh <span id="countdown">60</span>s</span>
     </div>
   </header>
 
   <main class="p-4 max-w-[1600px] mx-auto space-y-4">
 
     <!-- Summary Cards -->
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-3 animate-in" style="animation-delay: 0.05s">
-      <!-- Total Bets -->
-      <div class="stat-card rounded-md p-3" style="--accent: #00c8ff; --fill: 100%">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total Bets</div>
-        <div class="text-xl font-bold text-term-bright font-display">{{ total_bets }}</div>
-        <div class="text-term-muted mt-1">{{ pending_bets }} pending</div>
-      </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 animate-in" style="animation-delay:0.05s">
 
       <!-- Win Rate -->
       <div class="stat-card rounded-md p-3"
@@ -191,54 +124,54 @@
           {% if (won_bets + lost_bets) > 0 %}
             {% if won_bets / (won_bets + lost_bets) >= 0.5 %}text-term-green{% else %}text-term-red{% endif %}
           {% else %}text-term-bright{% endif %}">
-          {% if (won_bets + lost_bets) > 0 %}
-            {{ ((won_bets / (won_bets + lost_bets)) * 100)|round(1) }}%
-          {% else %}
-            --
-          {% endif %}
+          {% if (won_bets + lost_bets) > 0 %}{{ ((won_bets / (won_bets + lost_bets)) * 100)|round(1) }}%{% else %}--{% endif %}
         </div>
-        <div class="text-term-muted mt-1">{{ won_bets }}W / {{ lost_bets }}L</div>
+        <div class="text-term-muted mt-1">{{ won_bets }}W / {{ lost_bets }}L · {{ pending_bets }} open</div>
       </div>
 
       <!-- Total P&L -->
       <div class="stat-card rounded-md p-3"
         style="--accent: {% if total_pnl >= 0 %}#00e396{% else %}#ff4560{% endif %};
                --fill: {% if total_cost > 0 %}{{ ((total_pnl|abs / total_cost) * 100)|round|int }}%{% else %}0%{% endif %}">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total P&L</div>
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total P&amp;L</div>
         <div class="text-xl font-bold font-display
           {% if total_pnl > 0 %}text-term-green glow-green{% elif total_pnl < 0 %}text-term-red glow-red{% else %}text-term-bright{% endif %}">
           {% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}
         </div>
         <div class="text-term-muted mt-1">
-          {% if total_cost > 0 %}{{ ((total_pnl / total_cost) * 100)|round(1) }}% ROI{% else %}no trades{% endif %}
+          {% if total_cost > 0 %}{{ ((total_pnl / total_cost) * 100)|round(1) }}% ROI on ${{ "%.0f"|format(total_cost) }} staked{% else %}no trades{% endif %}
         </div>
       </div>
 
-      <!-- Total Invested -->
-      <div class="stat-card rounded-md p-3" style="--accent: #775dd0; --fill: {% if total_cost > 0 %}60%{% else %}0%{% endif %}">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Invested</div>
-        <div class="text-xl font-bold text-term-bright font-display">${{ "%.2f"|format(total_cost) }}</div>
-        <div class="text-term-muted mt-1">{{ paper_bets }} paper</div>
+      <!-- Total Bets -->
+      <div class="stat-card rounded-md p-3" style="--accent:#00c8ff; --fill:100%">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Total Bets</div>
+        <div class="text-xl font-bold text-term-bright font-display">{{ total_bets }}</div>
+        <div class="text-term-muted mt-1">{{ paper_bets }} paper · {{ total_bets - paper_bets }} live</div>
       </div>
 
-      <!-- Weather Data -->
-      <div class="stat-card rounded-md p-3" style="--accent: #00c8ff; --fill: 80%">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Weather Data</div>
-        <div class="text-xl font-bold text-term-cyan font-display glow-cyan">{{ "{:,}".format(observation_count) }}</div>
-        <div class="text-term-muted mt-1">{{ peak_count }} peaks</div>
+      <!-- Today's Watch count -->
+      <div class="stat-card rounded-md p-3" style="--accent:#775dd0; --fill:{% if today_status|length > 0 %}{{ [today_status|length * 5, 100]|min }}%{% else %}0%{% endif %}">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Today's Markets</div>
+        <div class="text-xl font-bold text-term-purple font-display">{{ today_status|length }}</div>
+        <div class="text-term-muted mt-1">
+          {% set cities_with_bets = today_status | selectattr('bet_bracket') | list | length %}
+          {{ cities_with_bets }} bet{{ 's' if cities_with_bets != 1 else '' }} placed
+        </div>
       </div>
+
     </div>
 
-    <!-- Main content: two columns -->
+    <!-- Main content: Recent Bets (left 2/3) + Today's Watch (right 1/3) -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-      <!-- Recent Bets (main, 2 cols) -->
-      <div class="lg:col-span-2 card rounded-md animate-in" style="animation-delay: 0.1s">
+      <!-- Recent Bets -->
+      <div class="lg:col-span-2 card rounded-md animate-in" style="animation-delay:0.1s">
         <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
           <h2 class="font-display font-semibold text-term-bright text-sm">Recent Bets</h2>
-          <span class="text-term-muted text-[10px]">{{ recent_bets|length }} shown</span>
+          <span class="text-term-muted text-[10px]">{{ recent_bets|length }} shown · most recent first</span>
         </div>
-        <div class="overflow-auto max-h-[420px]">
+        <div class="overflow-auto max-h-[480px]">
           {% if recent_bets|length > 0 %}
           <table class="w-full text-[11px]">
             <thead>
@@ -246,33 +179,39 @@
                 <th class="px-4 py-2">City</th>
                 <th class="px-2 py-2">Date</th>
                 <th class="px-2 py-2">Bracket</th>
-                <th class="px-2 py-2 text-right">Price</th>
-                <th class="px-2 py-2 text-right">Size</th>
-                <th class="px-2 py-2 text-right">Cost</th>
+                <th class="px-2 py-2">Placed</th>
+                <th class="px-2 py-2 text-right" title="Price paid per $1 payout — lower = better odds">Odds</th>
+                <th class="px-2 py-2 text-right">Staked</th>
+                <th class="px-2 py-2 text-right text-term-green" title="Net profit if this bet wins: (payout − staked)">Win +</th>
                 <th class="px-2 py-2 text-right">Conf</th>
-                <th class="px-2 py-2 text-right">EV</th>
                 <th class="px-2 py-2 text-center">Status</th>
-                <th class="px-2 py-2 text-right">P&L</th>
+                <th class="px-2 py-2 text-right">P&amp;L</th>
               </tr>
             </thead>
             <tbody>
               {% for bet in recent_bets %}
               <tr>
-                <td class="px-4 py-2 text-term-bright font-medium"><a href="/city/{{ bet.city_key | urlencode }}" class="hover:text-term-cyan">{{ bet.city_key }}</a></td>
+                <td class="px-4 py-2 text-term-bright font-medium">
+                  <a href="/city/{{ bet.city_key | urlencode }}" class="hover:text-term-cyan">{{ bet.city_key }}</a>
+                </td>
                 <td class="px-2 py-2 text-term-muted">{{ bet.date }}</td>
                 <td class="px-2 py-2">
-                  <span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">
-                    {{ bet.bracket_label }}
-                  </span>
+                  <span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">{{ bet.bracket_label }}</span>
+                </td>
+                <td class="px-2 py-2 text-term-muted text-[10px]">
+                  {% if bet.placed_at %}
+                    {# placed_at is "YYYY-MM-DD HH:MM:SS" — show date only if different from bet.date #}
+                    {% set placed_date = bet.placed_at[:10] %}
+                    {% set placed_time = bet.placed_at[11:16] %}
+                    {% if placed_date == bet.date %}{{ placed_time }}{% else %}{{ placed_date }} {{ placed_time }}{% endif %}
+                  {% else %}--{% endif %}
                 </td>
                 <td class="px-2 py-2 text-right">${{ "%.2f"|format(bet.price) }}</td>
-                <td class="px-2 py-2 text-right">{{ "%.1f"|format(bet.size) }}</td>
                 <td class="px-2 py-2 text-right">${{ "%.2f"|format(bet.cost) }}</td>
-                <td class="px-2 py-2 text-right">{{ "%.0f"|format(bet.model_confidence * 100) }}%</td>
-                <td class="px-2 py-2 text-right
-                  {% if bet.expected_value > 0 %}text-term-green{% else %}text-term-red{% endif %}">
-                  {{ "%+.1f"|format(bet.expected_value * 100) }}%
+                <td class="px-2 py-2 text-right font-medium text-term-green">
+                  {% if bet.profit_if_win is not none %}+${{ "%.2f"|format(bet.profit_if_win) }}{% else %}--{% endif %}
                 </td>
+                <td class="px-2 py-2 text-right">{{ "%.0f"|format(bet.model_confidence * 100) }}%</td>
                 <td class="px-2 py-2 text-center">
                   {% if bet.won == 1 %}
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">WON</span>
@@ -285,7 +224,9 @@
                   {% endif %}
                 </td>
                 <td class="px-2 py-2 text-right font-medium
-                  {% if bet.pnl and bet.pnl > 0 %}text-term-green{% elif bet.pnl and bet.pnl < 0 %}text-term-red{% endif %}">
+                  {% if bet.pnl is not none and bet.pnl > 0 %}text-term-green
+                  {% elif bet.pnl is not none and bet.pnl < 0 %}text-term-red
+                  {% else %}text-term-muted{% endif %}">
                   {% if bet.pnl is not none %}{{ "%+.2f"|format(bet.pnl) }}{% else %}--{% endif %}
                 </td>
               </tr>
@@ -295,90 +236,87 @@
           {% else %}
           <div class="px-4 py-12 text-center text-term-muted">
             <div class="text-2xl mb-2">No bets yet</div>
-            <div class="text-[11px]">The orchestrator will place bets when confidence and EV thresholds are met.</div>
+            <div class="text-[11px]">The bot places bets when confidence and EV thresholds are met.</div>
           </div>
           {% endif %}
         </div>
       </div>
 
-      <!-- Right sidebar -->
-      <div class="space-y-4">
-
-        <!-- Active Markets -->
-        <div class="card rounded-md animate-in" style="animation-delay: 0.15s">
-          <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
-            <h2 class="font-display font-semibold text-term-bright text-sm">Active Markets</h2>
-            <span class="text-term-muted text-[10px]">{{ active_events|length }}</span>
+      <!-- Today's Watch -->
+      <div class="card rounded-md animate-in" style="animation-delay:0.15s">
+        <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+          <div>
+            <h2 class="font-display font-semibold text-term-bright text-sm">Today's Watch</h2>
+            <p class="text-term-muted text-[10px] mt-0.5">Active Polymarket cities — peak so far &amp; bet status</p>
           </div>
-          <div class="overflow-auto max-h-[240px]">
-            {% if active_events|length > 0 %}
-            <table class="w-full text-[11px]">
-              <thead>
-                <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
-                  <th class="px-4 py-2">City</th>
-                  <th class="px-2 py-2">Date</th>
-                  <th class="px-2 py-2 text-right">Brackets</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for event in active_events %}
-                <tr>
-                  <td class="px-4 py-1.5 text-term-bright"><a href="/city/{{ event.city_key | urlencode }}" class="hover:text-term-cyan">{{ event.city_key }}</a></td>
-                  <td class="px-2 py-1.5 text-term-muted">{{ event.date }}</td>
-                  <td class="px-2 py-1.5 text-right text-term-cyan">{{ event.bracket_count }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-            {% else %}
-            <div class="px-4 py-6 text-center text-term-muted text-[11px]">No active markets</div>
-            {% endif %}
-          </div>
+          <span class="text-term-muted text-[10px]">{{ today_status|length }} cities</span>
         </div>
-
-        <!-- Weather Peaks -->
-        <div class="card rounded-md animate-in" style="animation-delay: 0.2s">
-          <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
-            <h2 class="font-display font-semibold text-term-bright text-sm">Latest Peaks</h2>
-            <span class="text-term-muted text-[10px]">by city</span>
-          </div>
-          <div class="overflow-auto max-h-[240px]">
-            {% if latest_peaks|length > 0 %}
-            <table class="w-full text-[11px]">
-              <thead>
-                <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
-                  <th class="px-4 py-2">City</th>
-                  <th class="px-2 py-2">Date</th>
-                  <th class="px-2 py-2 text-right">Peak</th>
-                  <th class="px-2 py-2 text-right">Hour</th>
-                  <th class="px-2 py-2 text-right">Obs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for peak in latest_peaks %}
-                <tr>
-                  <td class="px-4 py-1.5 text-term-bright"><a href="/city/{{ peak.city_key | urlencode }}" class="hover:text-term-cyan">{{ peak.city_key }}</a></td>
-                  <td class="px-2 py-1.5 text-term-muted">{{ peak.date }}</td>
-                  <td class="px-2 py-1.5 text-right text-term-amber font-medium">{{ "%.1f"|format(peak.peak_temp) }}°</td>
-                  <td class="px-2 py-1.5 text-right">{{ peak.peak_hour }}:00</td>
-                  <td class="px-2 py-1.5 text-right text-term-muted">{{ peak.observation_count }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-            {% else %}
-            <div class="px-4 py-6 text-center text-term-muted text-[11px]">No weather data</div>
-            {% endif %}
-          </div>
+        <div class="overflow-auto max-h-[480px]">
+          {% if today_status|length > 0 %}
+          <table class="w-full text-[11px]">
+            <thead>
+              <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+                <th class="px-4 py-2">City</th>
+                <th class="px-2 py-2 text-right" title="Highest temperature recorded today so far">Peak Now</th>
+                <th class="px-2 py-2 text-right" title="Hour the peak occurred (local time)">At</th>
+                <th class="px-2 py-2">Our Bet</th>
+                <th class="px-2 py-2 text-right">Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in today_status %}
+              <tr>
+                <td class="px-4 py-1.5 font-medium">
+                  <a href="/city/{{ row.city_key | urlencode }}" class="text-term-bright hover:text-term-cyan">{{ row.city_key }}</a>
+                  {% if row.date != today %}<div class="text-term-muted text-[9px]">{{ row.date }}</div>{% endif %}
+                </td>
+                <td class="px-2 py-1.5 text-right font-bold
+                  {% if row.peak_temp is not none %}text-term-amber{% else %}text-term-muted{% endif %}">
+                  {% if row.peak_temp is not none %}{{ "%.1f"|format(row.peak_temp) }}°{% else %}--{% endif %}
+                </td>
+                <td class="px-2 py-1.5 text-right text-term-muted">
+                  {% if row.peak_hour is not none %}{{ "%02d"|format(row.peak_hour) }}:00{% else %}--{% endif %}
+                </td>
+                <td class="px-2 py-1.5">
+                  {% if row.bet_bracket %}
+                    <div class="flex flex-col gap-0.5">
+                      <span class="px-1 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px] w-fit">{{ row.bet_bracket }}</span>
+                      <span class="text-term-muted text-[9px]">
+                        staked ${{ "%.0f"|format(row.bet_cost) }}
+                        · win +${{ "%.0f"|format(row.bet_profit_if_win) }}
+                      </span>
+                    </div>
+                  {% else %}
+                    <span class="text-term-muted">no bet</span>
+                  {% endif %}
+                </td>
+                <td class="px-2 py-1.5 text-right">
+                  {% if row.bet_won == 1 %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green font-medium">WON</span>
+                  {% elif row.bet_won == 0 %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red font-medium">LOST</span>
+                  {% elif row.bet_bracket %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">open</span>
+                  {% else %}
+                    <span class="text-term-muted">--</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <div class="px-4 py-8 text-center text-term-muted text-[11px]">No active markets today</div>
+          {% endif %}
         </div>
-
       </div>
+
     </div>
 
-    <!-- Bottom row: Daily P&L -->
-    <div class="card rounded-md animate-in" style="animation-delay: 0.25s">
+    <!-- Daily P&L -->
+    <div class="card rounded-md animate-in" style="animation-delay:0.2s">
       <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
-        <h2 class="font-display font-semibold text-term-bright text-sm">Daily P&L</h2>
+        <h2 class="font-display font-semibold text-term-bright text-sm">Daily P&amp;L</h2>
         <span class="text-term-muted text-[10px]">last 30 days</span>
       </div>
       <div class="overflow-auto max-h-[280px]">
@@ -388,11 +326,12 @@
             <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
               <th class="px-4 py-2">Date</th>
               <th class="px-2 py-2 text-right">Bets</th>
-              <th class="px-2 py-2 text-right">Invested</th>
-              <th class="px-2 py-2 text-right">Profit</th>
-              <th class="px-2 py-2 text-right">Loss</th>
-              <th class="px-2 py-2 text-right">Net P&L</th>
-              <th class="px-2 py-2">Visual</th>
+              <th class="px-2 py-2 text-right">Staked</th>
+              <th class="px-2 py-2 text-right">Won</th>
+              <th class="px-2 py-2 text-right">Lost</th>
+              <th class="px-2 py-2 text-right">Net P&amp;L</th>
+              <th class="px-2 py-2 text-right">ROI</th>
+              <th class="px-2 py-2 w-24">Visual</th>
             </tr>
           </thead>
           <tbody>
@@ -402,20 +341,25 @@
               <td class="px-2 py-2 text-right">{{ day.bet_count }}</td>
               <td class="px-2 py-2 text-right">${{ "%.2f"|format(day.total_cost or 0) }}</td>
               <td class="px-2 py-2 text-right text-term-green">
-                {% if day.profit %}+${{ "%.2f"|format(day.profit) }}{% else %}--{% endif %}
+                {% if day.profit %}+${{ "%.2f"|format(day.profit) }}{% else %}<span class="text-term-muted">--</span>{% endif %}
               </td>
               <td class="px-2 py-2 text-right text-term-red">
-                {% if day.loss %}-${{ "%.2f"|format(day.loss|abs) }}{% else %}--{% endif %}
+                {% if day.loss %}-${{ "%.2f"|format(day.loss|abs) }}{% else %}<span class="text-term-muted">--</span>{% endif %}
               </td>
               <td class="px-2 py-2 text-right font-medium
                 {% if day.net_pnl > 0 %}text-term-green{% elif day.net_pnl < 0 %}text-term-red{% else %}text-term-muted{% endif %}">
                 {{ "%+.2f"|format(day.net_pnl or 0) }}
               </td>
+              <td class="px-2 py-2 text-right text-term-muted">
+                {% if day.total_cost and day.total_cost > 0 %}
+                  {{ "%.1f"|format((day.net_pnl or 0) / day.total_cost * 100) }}%
+                {% else %}--{% endif %}
+              </td>
               <td class="px-2 py-2">
-                <div class="flex items-center gap-0.5 h-3">
+                <div class="flex items-center h-3">
                   {% if day.net_pnl and day.net_pnl != 0 %}
-                    {% set bar_width = [([day.net_pnl|abs * 2, 1]|max), 80]|min %}
-                    <div class="h-full rounded-sm {% if day.net_pnl > 0 %}bg-term-green/40{% else %}bg-term-red/40{% endif %}"
+                    {% set bar_width = [([day.net_pnl|abs * 2, 1]|max), 90]|min %}
+                    <div class="h-full rounded-sm {% if day.net_pnl > 0 %}bg-term-green/50{% else %}bg-term-red/50{% endif %}"
                          style="width: {{ bar_width }}px"></div>
                   {% endif %}
                 </div>
@@ -432,21 +376,15 @@
 
   </main>
 
-  <!-- Footer -->
-  <footer class="border-t border-term-border px-4 py-2 text-[10px] text-term-muted flex items-center justify-between mt-4 animate-in" style="animation-delay: 0.3s">
-    <span>poly-weather v0.1.0 // paper trading terminal</span>
+  <footer class="border-t border-term-border px-4 py-2 text-[10px] text-term-muted flex items-center justify-between mt-4">
+    <span>poly-weather // paper trading terminal</span>
     <span>auto-refresh in <span id="countdown">60</span>s</span>
   </footer>
 
   <script>
-    // Countdown timer
     let seconds = 60;
     const el = document.getElementById('countdown');
-    setInterval(() => {
-      seconds--;
-      if (seconds <= 0) seconds = 60;
-      el.textContent = seconds;
-    }, 1000);
+    setInterval(() => { seconds--; if (seconds <= 0) seconds = 60; el.textContent = seconds; }, 1000);
   </script>
 
 </body>

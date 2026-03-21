@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from src.db.repositories import WeatherRepository
 from src.utils.logger import get_logger
 from src.weather.cities import CityConfig
-from src.weather.models import DailyPeak, HourlyObservation
+from src.weather.models import DailyPeak, DailyScrapeResult, HourlyObservation
 from src.weather.scraper import WUScraper
 
 log = get_logger(__name__)
@@ -50,6 +50,98 @@ class HistoricalLoader:
         self._scraper = scraper
         self._repo = repo
 
+    async def backfill_date_range(
+        self, city: CityConfig, start_date: str, end_date: str
+    ) -> None:
+        """Scrape all dates in [start_date, end_date] for a city.
+
+        Skips dates that already have data. Dates are inclusive.
+
+        Args:
+            city: CityConfig for the target city.
+            start_date: First date to scrape, "YYYY-MM-DD".
+            end_date: Last date to scrape, "YYYY-MM-DD".
+        """
+        from datetime import date as _date
+
+        start = _date.fromisoformat(start_date)
+        end = _date.fromisoformat(end_date)
+        dates = []
+        cur = start
+        while cur <= end:
+            dates.append(cur.strftime("%Y-%m-%d"))
+            cur += timedelta(days=1)
+
+        total_stored = 0
+        total_failed = 0
+
+        log.info(
+            "backfill_date_range_start",
+            city=city.key,
+            start_date=start_date,
+            end_date=end_date,
+            total_dates=len(dates),
+        )
+
+        for idx, date_str in enumerate(dates, 1):
+            existing = self._repo.get_daily_peak(city.key, date_str)
+            if existing:
+                log.debug("backfill_skip_existing", city=city.key, date=date_str)
+                continue
+
+            try:
+                result: DailyScrapeResult = await self._scraper.scrape_daily(city, date_str)
+                observations = result.observations
+
+                if observations:
+                    obs_dicts = [obs.to_dict() for obs in observations]
+                    count = self._repo.upsert_hourly_observations_batch(
+                        city.key, date_str, obs_dicts
+                    )
+                    total_stored += count
+
+                    peak = _compute_daily_peak(city.key, date_str, observations)
+                    if peak:
+                        self._repo.upsert_daily_peak(
+                            city_key=peak.city_key,
+                            date=peak.date,
+                            peak_temp=peak.peak_temp,
+                            peak_hour=peak.peak_hour,
+                            observation_count=peak.observation_count,
+                            summary_high_temp=result.summary_high_temp,
+                        )
+                else:
+                    total_failed += 1
+                    log.warning("no_data_for_date", city=city.key, date=date_str)
+
+            except Exception as exc:
+                total_failed += 1
+                log.error(
+                    "backfill_day_failed",
+                    city=city.key,
+                    date=date_str,
+                    error=str(exc),
+                )
+
+            await asyncio.sleep(RATE_LIMIT_SECONDS)
+
+            if idx % PROGRESS_LOG_INTERVAL == 0:
+                log.info(
+                    "backfill_progress",
+                    city=city.key,
+                    days_processed=idx,
+                    days_total=len(dates),
+                    observations_stored=total_stored,
+                    failures=total_failed,
+                )
+
+        log.info(
+            "backfill_date_range_complete",
+            city=city.key,
+            observations_stored=total_stored,
+            failures=total_failed,
+        )
+
     async def backfill(self, city: CityConfig, days: int = 365) -> None:
         """Scrape N days of historical data for a city.
 
@@ -84,7 +176,8 @@ class HistoricalLoader:
                 continue
 
             try:
-                observations = await self._scraper.scrape_daily(city, date_str)
+                result: DailyScrapeResult = await self._scraper.scrape_daily(city, date_str)
+                observations = result.observations
 
                 if observations:
                     # Store observations in batch
@@ -103,6 +196,7 @@ class HistoricalLoader:
                             peak_temp=peak.peak_temp,
                             peak_hour=peak.peak_hour,
                             observation_count=peak.observation_count,
+                            summary_high_temp=result.summary_high_temp,
                         )
                 else:
                     total_failed += 1

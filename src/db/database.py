@@ -32,6 +32,8 @@ class Database:
         self._conn.executescript(SCHEMA_SQL)
         self._migrate_model_results_add_blob()
         self._migrate_time_local_to_24h()
+        self._migrate_clean_resolution_url_dots()
+        self._migrate_daily_peaks_add_summary_high()
         self._conn.commit()
         log.info("database_initialized", path=self._db_path)
 
@@ -76,6 +78,46 @@ class Database:
             WHERE time_local LIKE '% AM' OR time_local LIKE '% PM'
         """)
         log.info("migrated_time_local_to_24h", rows=count)
+
+    def _migrate_daily_peaks_add_summary_high(self) -> None:
+        """Add summary_high_temp REAL column to daily_peaks if missing (idempotent)."""
+        assert self._conn is not None
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(daily_peaks)").fetchall()}
+        if "summary_high_temp" not in cols:
+            self._conn.execute("ALTER TABLE daily_peaks ADD COLUMN summary_high_temp REAL")
+            self._conn.commit()
+            log.info("migrated_daily_peaks_add_summary_high")
+
+    def _migrate_clean_resolution_url_dots(self) -> None:
+        """Strip trailing dots/punctuation from wu_url_path values caused by early regex bug.
+
+        Idempotent — only touches rows where wu_url_path ends with a dot.
+        """
+        assert self._conn is not None
+        # Check table exists first (may be a fresh DB before schema runs)
+        tables = {r[0] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "city_resolution_urls" not in tables:
+            return
+        result = self._conn.execute(
+            "SELECT COUNT(*) FROM city_resolution_urls WHERE wu_url_path LIKE '%.'"
+        ).fetchone()
+        count = result[0] if result else 0
+        if count == 0:
+            return
+        self._conn.execute("""
+            UPDATE city_resolution_urls
+            SET wu_url_path = rtrim(wu_url_path, './,''\")')
+            WHERE wu_url_path LIKE '%.'
+        """)
+        self._conn.execute("""
+            UPDATE city_resolution_urls
+            SET wu_url = 'https://www.wunderground.com/history/daily/' || wu_url_path
+            WHERE wu_url_path IS NOT NULL
+        """)
+        self._conn.commit()
+        log.info("migrated_clean_resolution_url_dots", rows=count)
 
     def close(self) -> None:
         if self._conn:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 import uuid
 from pathlib import Path
@@ -36,6 +37,82 @@ _backfill_semaphore = asyncio.Semaphore(1)  # for 30-day backfills (slow, ~2min 
 
 # ML trainer singleton (caches trained models in-memory)
 _ml_trainer: MLTrainer | None = None
+
+# APScheduler for background periodic jobs
+_scheduler = None
+
+# WU hourly forecast cache: {city_key: {"fetched_at": float, "data": list[dict], "unit": str}}
+_wu_forecast_cache: dict[str, dict] = {}
+
+# AI bot state — persists only for this process lifetime (off by default)
+_ai_bot_state: dict = {
+    "enabled": False,
+    "city_keys": [],     # ordered list of cities with active events (refreshed each cycle start)
+    "city_index": 0,     # next city to analyze
+    "last_run_at": 0.0,
+    "runs_today": 0,
+    "bets_today": 0,
+    "last_city": None,
+    "last_error": None,
+}
+
+
+def _tiered_bet_size(confidence: float, price: float) -> float:
+    """Return USDC bet size based on confidence and edge. Returns 0.0 if below threshold.
+
+    Tiers (confidence AND minimum edge both required):
+      ≥88% conf, ≥25% edge  →  $200
+      ≥80% conf, ≥18% edge  →  $100
+      ≥75% conf, ≥12% edge  →  $40
+      below any tier        →   $0  (skip)
+    """
+    edge = confidence - price
+    if confidence >= 0.88 and edge >= 0.25:
+        return 200.0
+    if confidence >= 0.80 and edge >= 0.18:
+        return 100.0
+    if confidence >= 0.75 and edge >= 0.12:
+        return 40.0
+    return 0.0
+
+
+def _get_best_active_event_brackets(db, city_key: str, today: str) -> tuple[list[dict], str]:
+    """Return (brackets, event_date) for the best tradeable active event.
+
+    Tries today first. If today's event has no brackets in the tradeable range
+    (0.05–0.95 YES price), falls back to tomorrow's event.
+    Returns ([], today) if no tradeable event is found at all.
+    """
+    import datetime as _dt
+    tomorrow = (_dt.date.fromisoformat(today) + _dt.timedelta(days=1)).isoformat()
+
+    for candidate_date in (today, tomorrow):
+        events = db.conn.execute(
+            "SELECT event_id FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ?",
+            (city_key, candidate_date),
+        ).fetchall()
+        brackets: list[dict] = []
+        for ev in events:
+            brows = db.conn.execute(
+                "SELECT id, bracket_label, current_yes_price, current_no_price, "
+                "clob_token_id_yes, clob_token_id_no FROM polymarket_brackets WHERE event_id = ?",
+                (ev["event_id"],),
+            ).fetchall()
+            for b in brows:
+                yp = b["current_yes_price"] or 0.0
+                np_ = round(1.0 - yp, 4) if yp else 0.0
+                brackets.append({
+                    "label": b["bracket_label"],
+                    "yes_price": yp,
+                    "no_price": np_,
+                    "yes_token_id": b["clob_token_id_yes"] or "",
+                    "no_token_id": b["clob_token_id_no"] or "",
+                    "db_id": b["id"],
+                    "event_id": ev["event_id"],
+                })
+        if any(0.05 <= b["yes_price"] <= 0.95 for b in brackets):
+            return brackets, candidate_date
+    return [], today
 
 
 def get_ml_trainer() -> MLTrainer:
@@ -206,26 +283,50 @@ async def dashboard(request: Request):
         "SELECT COALESCE(SUM(cost), 0) as total FROM bets"
     ).fetchone()["total"]
 
-    # Recent bets
+    # Recent bets — include placed time and profit-if-win
     recent_bets = conn.execute("""
-        SELECT b.*, e.title as event_title
+        SELECT b.*,
+               e.title as event_title,
+               e.slug as event_slug,
+               datetime(b.created_at, 'unixepoch') as placed_at,
+               (b.size - b.cost) as profit_if_win
         FROM bets b
         LEFT JOIN polymarket_events e ON b.event_id = e.event_id
         ORDER BY b.created_at DESC
         LIMIT 50
     """).fetchall()
 
-    # Active events today
+    # Today's watch: active markets merged with today's peaks and our latest bet per city
     from src.utils.time_utils import today_in_tz
     today = today_in_tz("UTC")
-    active_events = conn.execute("""
-        SELECT e.*, COUNT(br.id) as bracket_count
+    today_status = conn.execute("""
+        SELECT
+            e.city_key,
+            e.event_id,
+            e.slug,
+            e.date,
+            dp.peak_temp,
+            dp.peak_hour,
+            dp.observation_count,
+            b.bracket_label  as bet_bracket,
+            b.price          as bet_price,
+            b.cost           as bet_cost,
+            (b.size - b.cost) as bet_profit_if_win,
+            b.won            as bet_won,
+            b.pnl            as bet_pnl,
+            (SELECT COUNT(*) FROM polymarket_brackets br
+             WHERE br.event_id = e.event_id) as bracket_count
         FROM polymarket_events e
-        LEFT JOIN polymarket_brackets br ON e.event_id = br.event_id
+        LEFT JOIN daily_peaks dp
+               ON dp.city_key = e.city_key AND dp.date = e.date
+        LEFT JOIN bets b ON b.id = (
+            SELECT id FROM bets b2
+            WHERE b2.city_key = e.city_key AND b2.date = e.date
+            ORDER BY b2.created_at DESC LIMIT 1
+        )
         WHERE e.status = 'active' AND e.date >= ?
-        GROUP BY e.event_id
         ORDER BY e.date, e.city_key
-        LIMIT 50
+        LIMIT 60
     """, (today,)).fetchall()
 
     # Daily P&L summary
@@ -275,12 +376,12 @@ async def dashboard(request: Request):
         "total_pnl": total_pnl,
         "total_cost": total_cost,
         "recent_bets": recent_bets,
-        "active_events": active_events,
+        "today_status": today_status,
+        "today": today,
         "daily_pnl": daily_pnl,
         "observation_count": observation_count,
         "peak_count": peak_count,
         "cities_with_data": cities_with_data,
-        "latest_peaks": latest_peaks,
         "now": int(time.time()),
     })
 
@@ -527,6 +628,8 @@ async def api_opportunities():
                 "edge": round(guidance.edge, 4),
                 "gain_pct": guidance.potential_gain_pct,
                 "brackets": guidance.brackets,
+                "best_bracket":       guidance.best_bracket,
+                "best_bracket_price": guidance.best_bracket_price,
                 "wu_at": guidance.wu_scraped_at,
                 "mkt_at": guidance.market_polled_at,
             },
@@ -608,6 +711,13 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
         job_repo = JobRunRepository(db)
         scrape_date = date or today_in_tz(city.timezone)
         run_id = job_repo.create_run("scrape", city.key)
+
+        # Use DB-stored WU URL if available (overrides static config)
+        from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+        effective_path = get_effective_wu_url_path(city, db)
+        if effective_path != city.wu_url_path:
+            log.info("scrape_using_db_url", city=city.key, path=effective_path)
+            city = dataclasses.replace(city, wu_url_path=effective_path)
 
         try:
             scraper = WUScraper(headless=True)
@@ -756,6 +866,13 @@ async def _run_backfill_job(job_id: str, city, days: int):
         repo = WeatherRepository(db)
         job_repo = JobRunRepository(db)
         run_id = job_repo.create_run("backfill", city.key, metadata={"days": days})
+
+        # Use DB-stored WU URL if available
+        from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+        effective_path = get_effective_wu_url_path(city, db)
+        if effective_path != city.wu_url_path:
+            log.info("backfill_using_db_url", city=city.key, path=effective_path)
+            city = dataclasses.replace(city, wu_url_path=effective_path)
 
         try:
             scraper = WUScraper(headless=True)
@@ -1048,6 +1165,34 @@ async def api_city_bets(city_key: str):
     return [dict(r) for r in rows]
 
 
+@app.get("/api/city/{city_key}/market")
+async def api_city_market(city_key: str):
+    """Active Polymarket event + brackets + bets for a city."""
+    db = get_db()
+    event = db.conn.execute(
+        """SELECT * FROM polymarket_events
+           WHERE city_key = ?
+           ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, date DESC
+           LIMIT 1""",
+        (city_key,),
+    ).fetchone()
+    if not event:
+        return {"event": None, "brackets": [], "bets": []}
+    brackets = db.conn.execute(
+        "SELECT * FROM polymarket_brackets WHERE event_id = ? ORDER BY bracket_label",
+        (event["event_id"],),
+    ).fetchall()
+    bets = db.conn.execute(
+        "SELECT * FROM bets WHERE event_id = ? ORDER BY created_at DESC",
+        (event["event_id"],),
+    ).fetchall()
+    return {
+        "event": dict(event),
+        "brackets": [dict(b) for b in brackets],
+        "bets": [dict(b) for b in bets],
+    }
+
+
 @app.get("/api/city/{city_key}/hourly")
 async def api_city_hourly(
     city_key: str,
@@ -1087,7 +1232,8 @@ async def api_city_peak_hours(
     """For each date, return only the hour(s) that reached the daily max temperature.
 
     If two consecutive hours tied for the peak, both are returned so the user
-    can see the plateau.
+    can see the plateau. Each row is enriched with metar_temp and om_temp where
+    available for source comparison.
     """
     db = get_db()
     conditions = ["o.city_key = ?"]
@@ -1100,7 +1246,7 @@ async def api_city_peak_hours(
         params.append(date_to)
     where = " AND ".join(conditions)
     rows = db.conn.execute(
-        f"""SELECT o.*
+        f"""SELECT o.*, dp.summary_high_temp
             FROM hourly_observations o
             JOIN (
                 SELECT date, MAX(temperature) AS peak_temp
@@ -1108,12 +1254,55 @@ async def api_city_peak_hours(
                 WHERE city_key = ?
                 GROUP BY date
             ) p ON o.date = p.date AND o.temperature = p.peak_temp
+            LEFT JOIN daily_peaks dp ON dp.city_key = o.city_key AND dp.date = o.date
             WHERE {where}
             ORDER BY o.date DESC, o.hour ASC
             LIMIT ?""",
         [city_key, *params, limit],
     ).fetchall()
-    return [dict(r) for r in rows]
+
+    result = [dict(r) for r in rows]
+    if not result:
+        return result
+
+    from src.weather.cities import get_city
+    city = get_city(city_key)
+    if not city:
+        return result
+
+    dates = [r["date"] for r in result]
+    start_date = min(dates)
+    end_date = max(dates)
+
+    from src.weather import metar as metar_mod, open_meteo
+
+    async def _fetch_om():
+        try:
+            return await open_meteo.fetch_historical(city, start_date, end_date)
+        except Exception as exc:
+            log.warning("peak_hours_om_error", error=str(exc))
+            return {}
+
+    async def _fetch_metar():
+        try:
+            data = await metar_mod.fetch(city, hours=720)
+            lookup: dict[tuple[str, int], float] = {}
+            for obs in data["observations"]:
+                key = (obs["date"], obs["hour"])
+                lookup[key] = obs["temperature"]  # last reading in that hour wins
+            return lookup
+        except Exception as exc:
+            log.warning("peak_hours_metar_error", error=str(exc))
+            return {}
+
+    om_lookup, metar_lookup = await asyncio.gather(_fetch_om(), _fetch_metar())
+
+    for r in result:
+        key = (r["date"], r["hour"])
+        r["om_temp"] = om_lookup.get(key)
+        r["metar_temp"] = metar_lookup.get(key)
+
+    return result
 
 
 @app.get("/api/city/{city_key}/stats")
@@ -1137,12 +1326,12 @@ async def api_city_ml_results(city_key: str):
 
 
 @app.post("/api/city/{city_key}/train-models")
-async def api_city_train_models(city_key: str):
+async def api_city_train_models(city_key: str, target_date: str | None = None):
     db = get_db()
     model_repo = ModelResultRepository(db)
     trainer = get_ml_trainer()
 
-    results = trainer.train(city_key)
+    results = trainer.train(city_key, target_date=target_date)
     if not results:
         return {"error": "Not enough data to train (need ≥60 valid days with hourly observations)"}
 
@@ -1183,6 +1372,208 @@ async def api_city_open_meteo(city_key: str):
         return {"error": str(exc)}
 
 
+@app.get("/api/city/{city_key}/wu-forecast")
+async def api_city_wu_forecast(city_key: str):
+    """Return the cached WU hourly forecast for a city.
+
+    Populated by the background scheduler every 10–30 minutes.
+    Returns empty data if the city hasn't been scraped yet.
+    """
+    cached = _wu_forecast_cache.get(city_key)
+    if not cached:
+        return {"data": [], "fetched_at": None, "unit": None}
+    return cached
+
+
+@app.post("/api/city/{city_key}/llm-analyze")
+async def api_city_llm_analyze(city_key: str, execute: bool = False):
+    """Analyze today's weather data with Claude and return bracket betting recommendations.
+
+    Args:
+        city_key: City identifier.
+        execute: If True, place paper bets for all actionable recommendations.
+
+    Returns JSON with analysis narrative and per-bracket recommendations.
+    """
+    from config import settings
+    from src.weather.cities import get_city
+    from src.utils.time_utils import today_in_tz, current_hour_in_tz
+    from src.weather import open_meteo, metar as metar_mod
+    from src.strategy.llm_advisor import analyze as llm_analyze
+    from src.polymarket.trader import PolymarketTrader
+
+    if not settings.anthropic_api_key:
+        return {"error": "ANTHROPIC_API_KEY not configured"}
+
+    city = get_city(city_key)
+    if not city:
+        return {"error": f"Unknown city: {city_key}"}
+
+    db = get_db()
+    today = today_in_tz(city.timezone)
+    current_hour = current_hour_in_tz(city.timezone)
+
+    # --- Find best tradeable event (today or tomorrow if today is fully settled) ---
+    brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+    if not brackets:
+        return {"error": f"No active tradeable brackets found for {city_key} (today or tomorrow)"}
+
+    # --- Gather WU observations (for event_date) ---
+    wu_rows = db.conn.execute(
+        "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+        "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+        (city_key, event_date),
+    ).fetchall()
+    wu_obs = [dict(r) for r in wu_rows]
+
+    # --- WU summary high (for event_date) ---
+    peak_row = db.conn.execute(
+        "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+        (city_key, event_date),
+    ).fetchone()
+    summary_high = peak_row["summary_high_temp"] if peak_row else None
+
+    # --- WU forecast from cache ---
+    wu_fc_cached = _wu_forecast_cache.get(city_key, {})
+    wu_forecast = wu_fc_cached.get("data", [])
+
+    # --- Open-Meteo (filter to event_date) ---
+    om_hourly: list[dict] = []
+    try:
+        om_data = await open_meteo.fetch(city)
+        om_hourly = [
+            {"hour": h["hour"], "temperature": h["temperature"], "is_forecast": h.get("is_forecast", False)}
+            for h in om_data.get("hourly", []) if h.get("date") == event_date
+        ]
+    except Exception as exc:
+        log.warning("llm_analyze_om_error", city=city_key, error=str(exc))
+
+    # --- METAR (filter to event_date) ---
+    metar_obs_list: list[dict] = []
+    try:
+        metar_data = await metar_mod.fetch(city, hours=24)
+        metar_obs_list = [
+            {"hour": o["hour"], "temperature": o["temperature"]}
+            for o in metar_data.get("observations", [])
+            if o.get("date") == event_date
+        ]
+    except Exception as exc:
+        log.warning("llm_analyze_metar_error", city=city_key, error=str(exc))
+
+    # --- Historical peak hours ---
+    hist_peaks = db.conn.execute(
+        "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+        "ORDER BY date DESC LIMIT 14",
+        (city_key,),
+    ).fetchall()
+    peak_history = [dict(r) for r in hist_peaks]
+    avg_peak_row = db.conn.execute(
+        "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+        (city_key,),
+    ).fetchone()
+    avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
+
+    # --- Call LLM ---
+    try:
+        advice = await llm_analyze(
+            api_key=settings.anthropic_api_key,
+            city_name=city.display_name,
+            unit=city.unit,
+            today=event_date,
+            current_local_hour=current_hour,
+            wu_obs=wu_obs,
+            wu_forecast=wu_forecast,
+            om_hourly=om_hourly,
+            metar_obs=metar_obs_list,
+            summary_high=summary_high,
+            brackets=brackets,
+            peak_history=peak_history,
+            avg_peak_hour=avg_peak_hour,
+        )
+    except Exception as exc:
+        log.error("llm_analyze_failed", city=city_key, error=str(exc))
+        return {"error": f"LLM analysis failed: {exc}"}
+
+    # --- Optionally execute bets ---
+    executed: list[dict] = []
+    if execute:
+        trader = PolymarketTrader(settings)
+        for rec in advice.recommendations:
+            if rec.action == "SKIP" or not rec.token_id:
+                continue
+            if rec.price <= 0.01:
+                continue
+            # Cap: don't buy NO when it already costs >85¢ (tiny edge, ties up capital)
+            if rec.action == "BUY_NO" and rec.price > 0.85:
+                continue
+            # Cap: don't buy YES when already priced >92¢ (almost no upside)
+            if rec.action == "BUY_YES" and rec.price > 0.92:
+                continue
+            bet_size = _tiered_bet_size(rec.confidence, rec.price)
+            if bet_size == 0.0:
+                continue
+            size = round(bet_size / rec.price, 2)
+            cost = round(rec.price * size, 2)
+            order = trader.place_limit_buy(
+                token_id=rec.token_id,
+                price=rec.price,
+                size=size,
+            )
+            db.conn.execute(
+                """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                   side, token_id, price, size, cost, order_id, order_status,
+                   current_max_temp, peak_hour, model_confidence, expected_value,
+                   is_paper, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    rec.event_id, rec.bracket_db_id, city_key, event_date,
+                    rec.bracket_label, rec.action, rec.token_id,
+                    rec.price, size, cost,
+                    order.order_id, order.status,
+                    advice.peak_temp_estimate or 0.0,
+                    peak_row["peak_hour"] if peak_row else 0,
+                    rec.confidence, rec.confidence - rec.price,
+                    int(order.is_paper), int(time.time()),
+                ),
+            )
+            db.conn.commit()
+            executed.append({
+                "bracket": rec.bracket_label,
+                "action": rec.action,
+                "price": rec.price,
+                "size": size,
+                "cost": cost,
+                "order_id": order.order_id,
+                "paper": order.is_paper,
+            })
+            log.info(
+                "LLM_BET", city=city_key, bracket=rec.bracket_label,
+                action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                paper=order.is_paper,
+            )
+
+    return {
+        "analysis": advice.analysis,
+        "peak_temp_estimate": advice.peak_temp_estimate,
+        "peak_confidence": advice.peak_confidence,
+        "model": advice.model,
+        "recommendations": [
+            {
+                "bracket": r.bracket_label,
+                "action": r.action,
+                "price": r.price,
+                "confidence": r.confidence,
+                "reasoning": r.reasoning,
+            }
+            for r in advice.recommendations
+        ],
+        "executed": executed,
+        "today": event_date,
+        "current_hour": current_hour,
+    }
+
+
 @app.post("/api/backfill-all")
 async def api_backfill_all(days: int = 365):
     """Trigger a 1-year backfill for ALL configured cities sequentially."""
@@ -1197,6 +1588,92 @@ async def api_backfill_all(days: int = 365):
     }
     asyncio.create_task(_run_backfill_all_job(job_id, city_keys, days))
     return {"job_id": job_id, "status": "running", "cities": len(city_keys), "days": days}
+
+
+@app.post("/api/backfill-date-range")
+async def api_backfill_date_range(start_date: str, end_date: str):
+    """Trigger a date-range backfill for ALL cities (e.g. March+April 2023).
+
+    Query params:
+        start_date: YYYY-MM-DD (inclusive)
+        end_date:   YYYY-MM-DD (inclusive)
+
+    Example: POST /api/backfill-date-range?start_date=2023-03-01&end_date=2023-04-30
+    """
+    from src.weather.cities import CITIES
+    job_id = str(uuid.uuid4())[:8]
+    city_keys = list(CITIES.keys())
+    _jobs[job_id] = {
+        "status": "running", "type": "backfill_date_range",
+        "total_cities": len(city_keys), "done_cities": 0,
+        "current_city": None,
+        "start_date": start_date, "end_date": end_date,
+        "started": time.time(),
+    }
+    asyncio.create_task(_run_backfill_date_range_job(job_id, city_keys, start_date, end_date))
+    return {"job_id": job_id, "status": "running", "cities": len(city_keys),
+            "start_date": start_date, "end_date": end_date}
+
+
+async def _run_backfill_date_range_job(
+    job_id: str, city_keys: list[str], start_date: str, end_date: str
+) -> None:
+    """Run date-range backfills sequentially for all cities."""
+    from src.db.repositories import JobRunRepository
+    from src.weather.cities import get_city
+
+    db = get_db()
+    job_repo = JobRunRepository(db)
+    run_id = job_repo.create_run(
+        "backfill_date_range",
+        metadata={"start_date": start_date, "end_date": end_date, "cities": city_keys},
+    )
+
+    failed_cities: list[str] = []
+
+    async with _backfill_semaphore:
+        scraper = WUScraper(headless=True)
+        await scraper.start()
+        try:
+            for idx, city_key in enumerate(city_keys):
+                _jobs[job_id]["current_city"] = city_key
+                city = get_city(city_key)
+                if not city:
+                    continue
+                effective_path = get_effective_wu_url_path(city, db)
+                if effective_path != city.wu_url_path:
+                    city = dataclasses.replace(city, wu_url_path=effective_path)
+                city_run_id = job_repo.create_run(
+                    "backfill", city_key,
+                    metadata={"start_date": start_date, "end_date": end_date},
+                )
+                try:
+                    repo = WeatherRepository(db)
+                    loader = HistoricalLoader(scraper, repo)
+                    await loader.backfill_date_range(city, start_date, end_date)
+                    cnt = db.conn.execute(
+                        "SELECT COUNT(*) as c FROM daily_peaks WHERE city_key = ?",
+                        (city_key,),
+                    ).fetchone()["c"]
+                    job_repo.finish_run(city_run_id, "success", records_processed=cnt)
+                    log.info("backfill_date_range_city_done",
+                             city=city_key, done=idx + 1, total=len(city_keys))
+                except Exception as exc:
+                    failed_cities.append(city_key)
+                    job_repo.finish_run(city_run_id, "error", error_message=str(exc))
+                    log.error("backfill_date_range_city_failed", city=city_key, error=str(exc))
+                _jobs[job_id]["done_cities"] = idx + 1
+        finally:
+            await scraper.stop()
+
+    job_repo.finish_run(
+        run_id, "error" if failed_cities else "success",
+        error_message=f"Failed: {failed_cities}" if failed_cities else None,
+    )
+    _jobs[job_id].update({
+        "status": "complete",
+        "failed_cities": failed_cities,
+    })
 
 
 async def _run_backfill_all_job(job_id: str, city_keys: list[str], days: int) -> None:
@@ -1223,6 +1700,12 @@ async def _run_backfill_all_job(job_id: str, city_keys: list[str], days: int) ->
                 city = get_city(city_key)
                 if city is None:
                     continue
+                # Use DB-stored WU URL if available
+                from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+                effective_path = get_effective_wu_url_path(city, db)
+                if effective_path != city.wu_url_path:
+                    log.info("backfill_all_using_db_url", city=city_key, path=effective_path)
+                    city = dataclasses.replace(city, wu_url_path=effective_path)
                 city_run_id = job_repo.create_run("backfill", city_key, metadata={"days": days})
                 try:
                     repo = WeatherRepository(db)
@@ -1262,13 +1745,15 @@ async def api_train_all_models():
     _jobs[job_id] = {"status": "running", "type": "train_all", "trained": [], "skipped": [], "errors": []}
 
     async def _run():
+        import datetime as _dt
         from src.weather.cities import CITIES as _CITIES
         db = get_db()
         model_repo = ModelResultRepository(db)
         trainer = get_ml_trainer()
+        today_str = _dt.date.today().isoformat()
         for city_key in _CITIES:
             try:
-                results = trainer.train(city_key)
+                results = trainer.train(city_key, target_date=today_str)
                 if not results:
                     _jobs[job_id]["skipped"].append(city_key)
                     continue
@@ -1327,6 +1812,183 @@ async def api_job_run(run_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Resolution URL tracker
+# ---------------------------------------------------------------------------
+
+@app.get("/resolution-urls", response_class=HTMLResponse)
+async def resolution_urls_page(request: Request):
+    return templates.TemplateResponse("resolution_urls.html", {"request": request})
+
+
+@app.get("/api/resolution-urls")
+async def api_resolution_urls():
+    """List all cities with their DB-stored and static WU URL paths."""
+    from src.weather.cities import CITIES
+
+    db = get_db()
+    rows = {
+        r["city_key"]: dict(r)
+        for r in db.conn.execute("SELECT * FROM city_resolution_urls").fetchall()
+    }
+
+    result = []
+    for city_key, city in CITIES.items():
+        db_row = rows.get(city_key, {})
+        wu_url_path_db = db_row.get("wu_url_path")
+        matches_static = (wu_url_path_db == city.wu_url_path) if wu_url_path_db else None
+
+        if not db_row:
+            status = "unchecked"
+        elif db_row.get("previous_url") and db_row["previous_url"] != wu_url_path_db:
+            status = "changed"
+        else:
+            status = "ok"
+
+        # METAR: uses wu_station_id directly — the same ICAO station as WU
+        metar_url = (
+            f"https://aviationweather.gov/metar/data"
+            f"?ids={city.wu_station_id}&format=decoded&date=0&hours=24&taf=false"
+        )
+
+        # Open-Meteo: coordinate-based, nearest grid point to the city's lat/lon
+        open_meteo_url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={city.lat}&longitude={city.lon}"
+            f"&current=temperature_2m,weather_code"
+            f"&timezone={city.timezone}"
+        )
+
+        result.append({
+            "city_key": city_key,
+            "city_name": city.display_name,
+            "wu_url_path_static": city.wu_url_path,
+            "wu_url_path_db": wu_url_path_db,
+            "wu_url": db_row.get("wu_url"),
+            "previous_url": db_row.get("previous_url"),
+            "changed_at": db_row.get("changed_at"),
+            "last_checked_at": db_row.get("last_checked_at"),
+            "check_count": db_row.get("check_count", 0),
+            "source_slug": db_row.get("source_slug"),
+            "matches_static": matches_static,
+            "status": status,
+            "metar_station": city.wu_station_id,
+            "metar_url": metar_url,
+            "open_meteo_url": open_meteo_url,
+            "lat": city.lat,
+            "lon": city.lon,
+        })
+    return result
+
+
+@app.post("/api/admin/check-resolution-urls")
+async def api_check_resolution_urls():
+    """Trigger an immediate resolution URL check for all cities."""
+    db = get_db()
+    job_id = f"res-url-{uuid.uuid4().hex[:6]}"
+    _jobs[job_id] = {"status": "running", "type": "resolution_url_check", "started": time.time()}
+
+    async def _run():
+        from src.polymarket.resolution_url_checker import check_all_cities
+        try:
+            results = await check_all_cities(db)
+            _jobs[job_id].update({
+                "status": "complete",
+                "total": len(results),
+                "changed": sum(1 for r in results if r.get("status") == "changed"),
+                "not_found": sum(1 for r in results if r.get("status") == "not_found"),
+                "results": results,
+            })
+        except Exception as exc:
+            log.error("resolution_url_check_job_failed", error=str(exc))
+            _jobs[job_id].update({"status": "error", "error": str(exc)})
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/admin/fix-resolution-urls")
+async def api_fix_resolution_urls():
+    """Audit DB wu_url_path vs static cities.py config, return diff report.
+
+    The DB-stored path overrides the static config for future scrapes.
+    This endpoint surfaces any discrepancies so operators can investigate.
+    """
+    from src.weather.cities import CITIES
+
+    db = get_db()
+    rows = {
+        r["city_key"]: dict(r)
+        for r in db.conn.execute("SELECT * FROM city_resolution_urls").fetchall()
+    }
+
+    report = []
+    for city_key, city in CITIES.items():
+        db_row = rows.get(city_key, {})
+        db_path = db_row.get("wu_url_path")
+        static_path = city.wu_url_path
+        if db_path is None:
+            match = None
+            status = "unchecked"
+        elif db_path == static_path:
+            match = True
+            status = "match"
+        else:
+            match = False
+            status = "mismatch"
+        report.append({
+            "city_key": city_key,
+            "city_name": city.display_name,
+            "static_path": static_path,
+            "db_path": db_path,
+            "match": match,
+            "status": status,
+        })
+
+    mismatches = [r for r in report if r["match"] is False]
+    log.info(
+        "resolution_url_audit",
+        total=len(report),
+        mismatches=len(mismatches),
+        unchecked=sum(1 for r in report if r["match"] is None),
+    )
+    return {
+        "report": report,
+        "total": len(report),
+        "mismatches": len(mismatches),
+        "unchecked": sum(1 for r in report if r["match"] is None),
+    }
+
+
+@app.post("/api/admin/clean-resolution-url-dots")
+async def api_clean_resolution_url_dots():
+    """Strip trailing dots from wu_url_path values caused by early regex bug.
+
+    Safe to call multiple times — idempotent.
+    """
+    db = get_db()
+    result = db.conn.execute(
+        "SELECT COUNT(*) FROM city_resolution_urls WHERE wu_url_path LIKE '%.'"
+    ).fetchone()
+    count = result[0] if result else 0
+
+    if count > 0:
+        db.conn.execute("""
+            UPDATE city_resolution_urls
+            SET wu_url_path = rtrim(wu_url_path, './,''\")')
+            WHERE wu_url_path LIKE '%.'
+        """)
+        db.conn.execute("""
+            UPDATE city_resolution_urls
+            SET wu_url = 'https://www.wunderground.com/history/daily/' || wu_url_path
+            WHERE wu_url_path IS NOT NULL
+        """)
+        db.conn.commit()
+        log.info("admin_clean_resolution_url_dots", rows_fixed=count)
+
+    return {"ok": True, "rows_fixed": count}
+
+
+# ---------------------------------------------------------------------------
 # Admin migrations
 # ---------------------------------------------------------------------------
 
@@ -1378,12 +2040,490 @@ async def api_fix_celsius_rounding():
 
 
 # ---------------------------------------------------------------------------
-# Shutdown
+# Startup / Shutdown
 # ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+async def startup():
+    global _scheduler
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    _scheduler = AsyncIOScheduler()
+
+    async def _run_resolution_url_check():
+        db = get_db()
+        from src.polymarket.resolution_url_checker import check_all_cities
+        try:
+            await check_all_cities(db)
+        except Exception as exc:
+            log.error("scheduled_resolution_check_failed", error=str(exc))
+
+    _scheduler.add_job(
+        _run_resolution_url_check,
+        "interval",
+        hours=3,
+        id="resolution_url_check",
+    )
+
+    async def _run_wu_forecast_job():
+        """Scrape WU hourly forecasts for all cities, respecting adaptive intervals."""
+        import dataclasses as _dc
+        from src.weather.cities import CITIES
+        from src.weather.scraper import WUScraper
+        from src.utils.time_utils import current_hour_in_tz
+        from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+
+        db = get_db()
+        now = time.time()
+        cities_to_scrape = []
+
+        for city in CITIES.values():
+            last = _wu_forecast_cache.get(city.key, {}).get("fetched_at", 0)
+            elapsed = now - last
+            city_hour = current_hour_in_tz(city.timezone)
+
+            row = db.conn.execute(
+                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                (city.key,),
+            ).fetchone()
+            avg_peak = int(row["avg"]) if row and row["avg"] else 14
+
+            near_peak = abs(city_hour - avg_peak) <= 1
+            threshold = 600 if near_peak else 1800  # 10 min vs 30 min
+
+            if elapsed >= threshold:
+                cities_to_scrape.append(city)
+
+        if not cities_to_scrape:
+            return
+
+        log.info("wu_forecast_job_start", cities=len(cities_to_scrape))
+        scraper = WUScraper(headless=True)
+        await scraper.start()
+        try:
+            for city in cities_to_scrape:
+                effective_path = get_effective_wu_url_path(city, db)
+                if effective_path != city.wu_url_path:
+                    city = _dc.replace(city, wu_url_path=effective_path)
+                try:
+                    data = await scraper.scrape_forecast_hourly(city)
+                    _wu_forecast_cache[city.key] = {
+                        "fetched_at": time.time(),
+                        "data": data,
+                        "unit": city.unit,
+                    }
+                except Exception as exc:
+                    log.warning("wu_forecast_job_city_failed", city=city.key, error=str(exc))
+        finally:
+            await scraper.stop()
+        log.info("wu_forecast_job_done", cities=len(cities_to_scrape))
+
+    _scheduler.add_job(
+        _run_wu_forecast_job,
+        "interval",
+        minutes=10,
+        id="wu_forecast_poll",
+    )
+
+    async def _run_market_poll_and_resolve():
+        """Poll Polymarket for latest prices and resolve any settled bets."""
+        db = get_db()
+        market_repo = MarketRepository(db)
+        from src.polymarket.market_monitor import MarketMonitor
+        monitor = MarketMonitor(market_repo)
+        try:
+            count = await monitor.poll_all()
+            log.info("market_poll_done", events=count)
+        except Exception as exc:
+            log.error("market_poll_failed", error=str(exc))
+
+    _scheduler.add_job(
+        _run_market_poll_and_resolve,
+        "interval",
+        minutes=30,
+        id="market_poll_resolve",
+    )
+
+    async def _run_llm_auto_bet():
+        """Run LLM analysis + auto-bet for one city per tick (round-robin over active cities)."""
+        from config import settings
+        from src.weather.cities import get_city, CITIES
+        from src.utils.time_utils import today_in_tz, current_hour_in_tz
+        from src.weather import open_meteo, metar as metar_mod
+        from src.strategy.llm_advisor import analyze as llm_analyze
+        from src.polymarket.trader import PolymarketTrader
+        import json as _json
+
+        if not _ai_bot_state["enabled"]:
+            return
+        if not settings.anthropic_api_key:
+            return
+
+        db = get_db()
+
+        # Refresh city list at the start of each cycle (when index wraps around)
+        if _ai_bot_state["city_index"] == 0 or not _ai_bot_state["city_keys"]:
+            # Find all cities that have active events today or tomorrow (forward-looking)
+            active_keys: list[str] = []
+            for ck, city in CITIES.items():
+                today = today_in_tz(city.timezone)
+                import datetime as _dt2
+                tomorrow = (_dt2.date.fromisoformat(today) + _dt2.timedelta(days=1)).isoformat()
+                row = db.conn.execute(
+                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? AND date <= ? LIMIT 1",
+                    (ck, today, tomorrow),
+                ).fetchone()
+                if row:
+                    active_keys.append(ck)
+            _ai_bot_state["city_keys"] = active_keys
+            if not active_keys:
+                return
+
+        city_keys = _ai_bot_state["city_keys"]
+        if not city_keys:
+            return
+
+        idx = _ai_bot_state["city_index"] % len(city_keys)
+        city_key = city_keys[idx]
+        _ai_bot_state["city_index"] = (idx + 1) % len(city_keys)
+        _ai_bot_state["last_city"] = city_key
+
+        city = get_city(city_key)
+        if not city:
+            return
+
+        today = today_in_tz(city.timezone)
+        current_hour = current_hour_in_tz(city.timezone)
+
+        try:
+            # Find best tradeable event (today or tomorrow if today is fully settled)
+            brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+            if not brackets:
+                return
+
+            # WU observations (for the event date — may be empty if event_date is tomorrow)
+            wu_rows = db.conn.execute(
+                "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                (city_key, event_date),
+            ).fetchall()
+            wu_obs = [dict(r) for r in wu_rows]
+
+            # WU summary high (for event date)
+            peak_row = db.conn.execute(
+                "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                (city_key, event_date),
+            ).fetchone()
+            summary_high = peak_row["summary_high_temp"] if peak_row else None
+
+            # WU forecast from cache
+            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
+
+            # Open-Meteo (filter to event_date so tomorrow forecasts align)
+            om_hourly: list[dict] = []
+            try:
+                om_data = await open_meteo.fetch(city)
+                om_hourly = [
+                    {"hour": h["hour"], "temperature": h["temperature"], "is_forecast": h.get("is_forecast", False)}
+                    for h in om_data.get("hourly", []) if h.get("date") == event_date
+                ]
+            except Exception:
+                pass
+
+            # METAR (filter to event_date)
+            metar_obs_list: list[dict] = []
+            try:
+                metar_data = await metar_mod.fetch(city, hours=24)
+                metar_obs_list = [
+                    {"hour": o["hour"], "temperature": o["temperature"]}
+                    for o in metar_data.get("observations", [])
+                    if o.get("date") == event_date
+                ]
+            except Exception:
+                pass
+
+            # Historical peak hours
+            hist_peaks = db.conn.execute(
+                "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+                "ORDER BY date DESC LIMIT 14",
+                (city_key,),
+            ).fetchall()
+            peak_history = [dict(r) for r in hist_peaks]
+            avg_peak_row = db.conn.execute(
+                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                (city_key,),
+            ).fetchone()
+            avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
+
+            advice = await llm_analyze(
+                api_key=settings.anthropic_api_key,
+                city_name=city.display_name,
+                unit=city.unit,
+                today=event_date,
+                current_local_hour=current_hour,
+                wu_obs=wu_obs,
+                wu_forecast=wu_forecast,
+                om_hourly=om_hourly,
+                metar_obs=metar_obs_list,
+                summary_high=summary_high,
+                brackets=brackets,
+                peak_history=peak_history,
+                avg_peak_hour=avg_peak_hour,
+            )
+
+            # Execute bets — with duplicate guard
+            executed_count = 0
+            trader = PolymarketTrader(settings)
+            for rec in advice.recommendations:
+                if rec.action == "SKIP" or not rec.token_id:
+                    continue
+                if rec.price <= 0.01:
+                    continue
+                # Cap: don't buy NO when it already costs >85¢ (tiny edge)
+                if rec.action == "BUY_NO" and rec.price > 0.85:
+                    continue
+                # Cap: don't buy YES when already priced >92¢ (almost no upside)
+                if rec.action == "BUY_YES" and rec.price > 0.92:
+                    continue
+                bet_size = _tiered_bet_size(rec.confidence, rec.price)
+                if bet_size == 0.0:
+                    continue
+                # Duplicate guard: skip if already bet on this bracket+side for this event date
+                existing = db.conn.execute(
+                    "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? LIMIT 1",
+                    (city_key, event_date, rec.bracket_label, rec.action),
+                ).fetchone()
+                if existing:
+                    continue
+
+                size = round(bet_size / rec.price, 2)
+                cost = round(rec.price * size, 2)
+                order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                db.conn.execute(
+                    """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                       side, token_id, price, size, cost, order_id, order_status,
+                       current_max_temp, peak_hour, model_confidence, expected_value,
+                       is_paper, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        rec.event_id, rec.bracket_db_id, city_key, event_date,
+                        rec.bracket_label, rec.action, rec.token_id,
+                        rec.price, size, cost,
+                        order.order_id, order.status,
+                        advice.peak_temp_estimate or 0.0,
+                        peak_row["peak_hour"] if peak_row else 0,
+                        rec.confidence, rec.confidence - rec.price,
+                        int(order.is_paper), int(time.time()),
+                    ),
+                )
+                db.conn.commit()
+                executed_count += 1
+                log.info(
+                    "AI_BOT_BET", city=city_key, bracket=rec.bracket_label,
+                    action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                    conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                )
+
+            # Log to DB
+            recs_json = _json.dumps([
+                {"bracket": r.bracket_label, "action": r.action,
+                 "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
+                for r in advice.recommendations
+            ])
+            db.conn.execute(
+                """INSERT INTO llm_analysis_log
+                   (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
+                    analysis_text, recs_json, bets_executed, model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (city_key, event_date, int(time.time()), current_hour,
+                 advice.peak_temp_estimate, advice.peak_confidence,
+                 advice.analysis, recs_json, executed_count, advice.model),
+            )
+            db.conn.commit()
+
+            _ai_bot_state["last_run_at"] = time.time()
+            _ai_bot_state["runs_today"] += 1
+            _ai_bot_state["bets_today"] += executed_count
+            _ai_bot_state["last_error"] = None
+            log.info("ai_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
+
+        except Exception as exc:
+            _ai_bot_state["last_error"] = str(exc)
+            log.error("ai_bot_tick_failed", city=city_key, error=str(exc))
+
+    _scheduler.add_job(
+        _run_llm_auto_bet,
+        "interval",
+        minutes=1,
+        id="llm_auto_bet",
+    )
+
+    _scheduler.start()
+    log.info("scheduler_started")
+
+    # Trigger an initial check 30 seconds after startup
+    asyncio.create_task(_delayed_resolution_check(30))
+    # Trigger initial WU forecast scrape 60 seconds after startup
+    asyncio.create_task(_delayed_wu_forecast(60))
+    # Trigger initial market poll + bet resolution 90 seconds after startup
+    asyncio.create_task(_delayed_market_poll(90))
+
+
+async def _delayed_resolution_check(delay_seconds: int) -> None:
+    await asyncio.sleep(delay_seconds)
+    db = get_db()
+    from src.polymarket.resolution_url_checker import check_all_cities
+    try:
+        await check_all_cities(db)
+    except Exception as exc:
+        log.error("startup_resolution_check_failed", error=str(exc))
+
+
+async def _delayed_market_poll(delay_seconds: int) -> None:
+    """Run market poll + bet resolution once after startup delay."""
+    await asyncio.sleep(delay_seconds)
+    db = get_db()
+    market_repo = MarketRepository(db)
+    from src.polymarket.market_monitor import MarketMonitor
+    monitor = MarketMonitor(market_repo)
+    try:
+        count = await monitor.poll_all()
+        log.info("startup_market_poll_done", events=count)
+    except Exception as exc:
+        log.error("startup_market_poll_failed", error=str(exc))
+
+
+async def _delayed_wu_forecast(delay_seconds: int) -> None:
+    """Run the WU forecast job once after a delay (initial warm-up)."""
+    await asyncio.sleep(delay_seconds)
+    import dataclasses as _dc
+    from src.weather.cities import CITIES
+    from src.weather.scraper import WUScraper
+    from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+
+    db = get_db()
+    log.info("wu_forecast_initial_start")
+    scraper = WUScraper(headless=True)
+    await scraper.start()
+    try:
+        for city in CITIES.values():
+            effective_path = get_effective_wu_url_path(city, db)
+            if effective_path != city.wu_url_path:
+                city = _dc.replace(city, wu_url_path=effective_path)
+            try:
+                data = await scraper.scrape_forecast_hourly(city)
+                _wu_forecast_cache[city.key] = {
+                    "fetched_at": time.time(),
+                    "data": data,
+                    "unit": city.unit,
+                }
+            except Exception as exc:
+                log.warning("wu_forecast_initial_city_failed", city=city.key, error=str(exc))
+    finally:
+        await scraper.stop()
+    log.info("wu_forecast_initial_done", cities=len(CITIES))
+
+
+@app.get("/ai-betting")
+async def ai_betting_page(request: Request):
+    return templates.TemplateResponse("ai_betting.html", {"request": request})
+
+
+@app.get("/api/ai-bot/status")
+async def api_ai_bot_status():
+    from src.weather.cities import CITIES
+    db = get_db()
+    # Count today's runs and bets from DB (survives restarts)
+    today_counts = {}
+    for ck, city in CITIES.items():
+        from src.utils.time_utils import today_in_tz
+        td = today_in_tz(city.timezone)
+        today_counts[ck] = td
+    # Use a rough today (UTC date) for DB counts
+    import datetime
+    today_utc = datetime.date.today().isoformat()
+    runs_today = db.conn.execute(
+        "SELECT COUNT(*) FROM llm_analysis_log WHERE date >= ?", (today_utc,)
+    ).fetchone()[0]
+    bets_today = db.conn.execute(
+        "SELECT COUNT(*) FROM bets WHERE date >= ? AND is_paper = 1", (today_utc,)
+    ).fetchone()[0]
+    return {
+        "enabled": _ai_bot_state["enabled"],
+        "city_index": _ai_bot_state["city_index"],
+        "active_city_count": len(_ai_bot_state["city_keys"]),
+        "active_cities": _ai_bot_state["city_keys"],
+        "last_run_at": _ai_bot_state["last_run_at"],
+        "last_city": _ai_bot_state["last_city"],
+        "last_error": _ai_bot_state["last_error"],
+        "runs_today": runs_today,
+        "bets_today": bets_today,
+    }
+
+
+@app.post("/api/ai-bot/toggle")
+async def api_ai_bot_toggle(enabled: bool):
+    _ai_bot_state["enabled"] = enabled
+    if enabled:
+        # Reset city list so it refreshes on next tick
+        _ai_bot_state["city_keys"] = []
+        _ai_bot_state["city_index"] = 0
+    log.info("ai_bot_toggled", enabled=enabled)
+    return {"enabled": _ai_bot_state["enabled"]}
+
+
+@app.get("/api/ai-bot/log")
+async def api_ai_bot_log(limit: int = 50):
+    import json as _json
+    db = get_db()
+    rows = db.conn.execute(
+        """SELECT id, city_key, date, analysis_time, hour_local, peak_estimate,
+                  peak_confidence, analysis_text, recs_json, bets_executed, model
+           FROM llm_analysis_log ORDER BY analysis_time DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    result = []
+    for r in rows:
+        entry = dict(r)
+        try:
+            entry["recommendations"] = _json.loads(r["recs_json"] or "[]")
+        except Exception:
+            entry["recommendations"] = []
+        del entry["recs_json"]
+        # Attach actual bets placed within 2 minutes of this analysis
+        bet_rows = db.conn.execute(
+            """SELECT bracket_label, side, size, price FROM bets
+               WHERE city_key = ? AND date = ?
+                 AND created_at BETWEEN ? AND ?
+               ORDER BY id""",
+            (r["city_key"], r["date"],
+             r["analysis_time"] - 120, r["analysis_time"] + 120),
+        ).fetchall()
+        entry["placed_bets"] = [dict(b) for b in bet_rows]
+
+        # Attach current live bracket prices from polymarket_brackets
+        mkt_rows = db.conn.execute(
+            """SELECT pb.bracket_label, pb.current_yes_price
+               FROM polymarket_brackets pb
+               JOIN polymarket_events pe ON pb.event_id = pe.event_id
+               WHERE pe.city_key = ? AND pe.date = ?
+               ORDER BY pb.bracket_label""",
+            (r["city_key"], r["date"]),
+        ).fetchall()
+        entry["market_brackets"] = [
+            {"label": m["bracket_label"], "yes_price": m["current_yes_price"] or 0.0}
+            for m in mkt_rows
+        ]
+        result.append(entry)
+    return {"log": result}
+
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _db
+    global _db, _scheduler
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
     if _db:
         _db.close()
         _db = None

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS daily_peaks (
     peak_temp         REAL NOT NULL,
     peak_hour         INTEGER NOT NULL,
     observation_count INTEGER NOT NULL,
+    summary_high_temp REAL,
     computed_at       INTEGER NOT NULL,
     UNIQUE(city_key, date)
 );
@@ -157,4 +158,31 @@ CREATE TABLE IF NOT EXISTS model_results (
     results_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_model_results_city ON model_results(city_key, trained_at DESC);
+
+CREATE TABLE IF NOT EXISTS city_resolution_urls (
+    city_key         TEXT PRIMARY KEY,
+    wu_url           TEXT,
+    wu_url_path      TEXT,
+    previous_url     TEXT,
+    changed_at       INTEGER,
+    last_checked_at  INTEGER,
+    check_count      INTEGER NOT NULL DEFAULT 0,
+    source_slug      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS llm_analysis_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_key        TEXT NOT NULL,
+    date            TEXT NOT NULL,
+    analysis_time   INTEGER NOT NULL,
+    hour_local      INTEGER NOT NULL,
+    peak_estimate   REAL,
+    peak_confidence REAL,
+    analysis_text   TEXT,
+    recs_json       TEXT,
+    bets_executed   INTEGER NOT NULL DEFAULT 0,
+    model           TEXT NOT NULL DEFAULT 'claude-haiku-4-5-20251001'
+);
+CREATE INDEX IF NOT EXISTS idx_llm_log_city_date ON llm_analysis_log(city_key, date);
+CREATE INDEX IF NOT EXISTS idx_llm_log_time ON llm_analysis_log(analysis_time DESC);
 """

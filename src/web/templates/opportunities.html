@@ -37,8 +37,10 @@
       <nav class="flex gap-3 text-[11px]">
         <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
         <a href="/opportunities" class="text-term-cyan">Opportunities</a>
+        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-muted hover:text-term-text">URLs</a>
       </nav>
     </div>
     <div class="flex items-center gap-3">
@@ -208,6 +210,13 @@
       return `${Math.round(s/3600)}h ago`;
     }
 
+    function wuFreshness(ts) {
+      const age = Date.now() / 1000 - ts;
+      if (age < 300) return { cls: 'text-term-muted', label: timeAgo(ts) };
+      if (age < 900) return { cls: 'text-term-amber', label: timeAgo(ts) };
+      return { cls: 'text-term-red', label: '⚠ ' + timeAgo(ts) };
+    }
+
     // Phase display config
     const PHASE_CONFIG = {
       'AT_PEAK':     { label: 'At Peak',     color: 'bg-term-green/15 text-term-green border-term-green/30', icon: '●', sortOrder: 0 },
@@ -334,120 +343,70 @@
       const g = o.g;
       if (!g) return '';
 
-      const actionColors = {
-        'BUY': 'border-term-green/50 bg-term-green/5',
-        'WATCH': 'border-term-amber/50 bg-term-amber/5',
-        'WAIT': 'border-term-border bg-term-surface',
-        'SKIP': 'border-term-red/30 bg-term-surface',
-        'NO_DATA': 'border-term-border bg-term-surface',
-      };
       const actionTextColors = {
         'BUY': 'text-term-green', 'WATCH': 'text-term-amber',
         'WAIT': 'text-term-muted', 'SKIP': 'text-term-red', 'NO_DATA': 'text-term-muted',
       };
-      const borderClass = actionColors[g.action] || 'border-term-border';
       const textClass = actionTextColors[g.action] || 'text-term-muted';
 
-      // Peak timing badge
       const phaseCfg = PHASE_CONFIG[o.peak_phase] || PHASE_CONFIG['UNKNOWN'];
       const timingLabel = peakTimingLabel(o);
 
-      // WU Status
-      let wuHTML = '';
+      // Row 3: WU data strip
+      let wuStrip = '';
       if (g.peak != null) {
         const trendIcon = g.trend < -0.5 ? '▼' : g.trend > 0.5 ? '▲' : '—';
-        const trendColor = g.trend < -0.5 ? 'text-term-cyan' : g.trend > 0.5 ? 'text-term-red' : 'text-term-muted';
-        wuHTML = `
-          <div class="mb-3">
-            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">WU Weather <span class="text-term-text">(${timeAgo(g.wu_at)})</span></div>
-            <div class="flex items-baseline gap-3">
-              <span class="text-2xl font-display font-bold text-term-amber">${g.peak}${u}</span>
-              <span class="text-term-muted">peak at ${g.peak_hour}:00</span>
-              <span class="${trendColor}">${trendIcon} ${g.trend > 0 ? '+' : ''}${g.trend}${u}</span>
-              <span class="text-term-muted">${g.obs_count} readings</span>
-            </div>
-            ${g.now_temp != null && g.now_temp != g.peak ? `<div class="text-[11px] text-term-muted mt-1">Now: ${g.now_temp}${u} at ${g.now_hour}:00 (${g.hours_since}h since peak)</div>` : ''}
-          </div>`;
+        const trendColor = g.trend < -0.5 ? 'text-term-cyan' : g.trend > 0.5 ? 'text-term-amber' : 'text-term-muted';
+        const fresh = g.wu_at ? wuFreshness(g.wu_at) : { cls: 'text-term-muted', label: 'unknown' };
+        wuStrip = `<span class="text-term-bright">WU: ${g.peak}${u}</span> at ${g.peak_hour}:00 · <span class="${fresh.cls}">${fresh.label}</span> · <span class="${trendColor}">${trendIcon}${g.trend > 0 ? '+' : ''}${g.trend}${u}</span> · ${g.obs_count} rdgs`;
       } else {
-        wuHTML = `<div class="text-term-muted mb-3 text-[11px]">No weather data scraped yet</div>`;
+        wuStrip = `<span class="text-term-muted">No weather data scraped yet</span>`;
       }
 
-      // Confidence bar
-      let confHTML = '';
-      if (g.conf > 0) {
-        const pct = (g.conf * 100).toFixed(0);
-        const barW = Math.min(g.conf * 100, 100);
-        const confColor = g.conf >= 0.85 ? 'bg-term-green' : g.conf >= 0.5 ? 'bg-term-amber' : 'bg-term-red';
-        const confText = g.conf >= 0.85 ? 'text-term-green' : g.conf >= 0.5 ? 'text-term-amber' : 'text-term-red';
-        confHTML = `
-          <div class="mb-3">
-            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Peak Confidence</div>
-            <div class="flex items-center gap-3">
-              <span class="${confText} font-bold text-lg font-display">${pct}%</span>
-              <div class="flex-1 h-2 bg-term-bg rounded-full overflow-hidden">
-                <div class="${confColor}/60 h-full rounded-full" style="width:${barW}%"></div>
-              </div>
-            </div>
-            ${g.conf_reason ? `<div class="text-[10px] text-term-muted mt-1">${g.conf_reason}</div>` : ''}
-          </div>`;
-      }
+      // Best bracket line
+      const bestLine = g.best_bracket
+        ? `Best: <b class="text-term-green">${g.best_bracket}</b> @ ${(g.best_bracket_price * 100).toFixed(0)}¢`
+        : '';
+      const matchLine = (g.match_bracket && g.match_bracket !== g.best_bracket)
+        ? ` · Matched: <span class="text-term-muted">${g.match_bracket}</span> @ <span class="${g.match_price < 0.02 ? 'text-term-red' : 'text-term-amber'}">${(g.match_price * 100).toFixed(0)}¢${g.match_price < 0.02 ? ' In Review' : ''}</span>`
+        : '';
+      const confLine = g.conf > 0 ? ` · Conf: ${(g.conf * 100).toFixed(0)}%` : '';
 
-      // Market + matching bracket
-      let marketHTML = '';
-      if (g.match_bracket) {
-        marketHTML = `
-          <div class="mb-3">
-            <div class="text-[10px] text-term-muted uppercase tracking-wider mb-1">Market <span class="text-term-text">(${timeAgo(g.mkt_at)})</span></div>
-            <div class="text-[11px]">
-              Matching bracket: <span class="text-term-cyan font-bold">${g.match_bracket}</span>
-              at <span class="text-term-amber font-bold">${(g.match_price * 100).toFixed(0)}¢</span>
-            </div>
-          </div>`;
-      }
+      // Buy button (inline)
+      const buyBtn = g.action === 'BUY' ? `
+        <div class="flex items-center gap-1 shrink-0">
+          <span class="text-term-muted text-[10px]">$</span>
+          <input type="number" id="bet-amt-${o.city_key}" value="10" min="1" step="1" style="background:#0a0e14;border:1px solid #1a2030;color:#c5d4e8;padding:2px 4px;border-radius:4px;font-family:inherit;font-size:10px;width:52px;text-align:right">
+          <button onclick='placeBet(${JSON.stringify({
+            event_id: o.event_id, bracket_id: g.match_id || 0, token_id: g.match_token || "",
+            price: g.match_price, city_key: o.city_key, date: o.date,
+            bracket_label: g.match_bracket, current_max_temp: g.peak || 0,
+            peak_hour: g.peak_hour || 0, model_confidence: g.conf,
+            expected_value: g.edge
+          })})' class="btn px-2 py-0.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[10px] font-bold">
+            Bet ${(g.match_price * 100).toFixed(0)}¢
+          </button>
+        </div>` : '';
 
-      // Recommendation
-      let recoHTML = `
-        <div class="p-3 rounded border-2 ${borderClass} mb-3">
-          <div class="flex items-center justify-between">
-            <div>
-              <span class="${textClass} font-bold text-lg font-display">${g.action}</span>
-              ${g.action === 'BUY' && g.match_bracket ? `<span class="text-term-green text-[11px] ml-2">${g.match_bracket} @ ${(g.match_price*100).toFixed(0)}¢ — +${(g.edge*100).toFixed(0)}% edge</span>` : ''}
-            </div>
-            ${g.action === 'BUY' ? `
-              <div class="flex items-center gap-2">
-                <span class="text-term-muted text-[11px]">$</span>
-                <input type="number" id="bet-amt-${o.city_key}" value="10" min="1" step="1" class="w-16 text-right">
-                <button onclick='placeBet(${JSON.stringify({
-                  event_id: o.event_id, bracket_id: g.match_id || 0, token_id: g.match_token || "",
-                  price: g.match_price, city_key: o.city_key, date: o.date,
-                  bracket_label: g.match_bracket, current_max_temp: g.peak || 0,
-                  peak_hour: g.peak_hour || 0, model_confidence: g.conf,
-                  expected_value: g.edge
-                })})' class="btn px-3 py-1.5 rounded bg-term-green/20 text-term-green border border-term-green/30 text-[12px] font-bold">
-                  Bet ${(g.match_price*100).toFixed(0)}¢
-                </button>
-              </div>` : ''}
-          </div>
-          <div class="text-[10px] ${textClass}/80 mt-1">${g.reason}</div>
-        </div>`;
-
-      // Brackets table (compact)
+      // Compact bracket bars
       let bracketsHTML = '';
       if (g.brackets && g.brackets.length) {
         const maxPrice = Math.max(...g.brackets.map(b => b.yes_price || 0), 0.01);
-        bracketsHTML = '<div class="space-y-0.5">';
+        bracketsHTML = '<div class="space-y-0.5 mt-2">';
         g.brackets.forEach(b => {
           const pct = ((b.yes_price || 0) * 100).toFixed(0);
           const barW = Math.max(((b.yes_price || 0) / maxPrice) * 100, 1);
-          const isMatch = g.match_bracket === b.label;
-          const hl = isMatch ? 'bg-term-cyan/15 border-l-2 border-term-cyan pl-2' : '';
+          const isBest = g.best_bracket === b.label;
+          const isMatch = !isBest && g.match_bracket === b.label;
+          const hl = isBest ? 'bg-term-green/10 border-l-2 border-term-green pl-1'
+                   : isMatch ? 'bg-term-cyan/10 border-l-2 border-term-cyan pl-1' : '';
           bracketsHTML += `
-            <div class="flex items-center gap-1 text-[10px] ${hl} py-0.5 rounded-sm">
-              <span class="w-24 text-term-bright truncate">${b.label}</span>
-              <div class="flex-1 h-2 bg-term-bg rounded-sm overflow-hidden">
-                <div class="h-full rounded-sm ${isMatch ? 'bg-term-cyan/40' : 'bg-term-muted/20'}" style="width:${barW}%"></div>
+            <div class="flex items-center gap-1 text-[9px] ${hl} py-0.5 rounded-sm">
+              <span class="w-20 text-term-bright truncate">${b.label}</span>
+              <div class="flex-1 h-1.5 bg-term-bg rounded-sm overflow-hidden">
+                <div class="h-full rounded-sm ${isBest ? 'bg-term-green/50' : isMatch ? 'bg-term-cyan/40' : 'bg-term-muted/20'}" style="width:${barW}%"></div>
               </div>
-              <span class="w-8 text-right ${isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
+              <span class="w-7 text-right ${isBest ? 'text-term-green font-bold' : isMatch ? 'text-term-cyan font-bold' : 'text-term-muted'}">${pct}%</span>
             </div>`;
         });
         bracketsHTML += '</div>';
@@ -455,7 +414,8 @@
 
       return `
         <div class="card rounded-md relative overflow-hidden">
-          <div class="px-4 py-2 border-b border-term-border flex items-center justify-between">
+          <!-- Row 1: Header -->
+          <div class="px-3 py-1.5 border-b border-term-border flex items-center justify-between">
             <div class="flex items-center gap-2">
               <h3 class="font-display font-semibold text-term-bright text-sm"><a href="/city/${encodeURIComponent(o.city_key)}" class="hover:text-term-cyan">${o.city_name}</a></h3>
               <span class="text-term-muted text-[10px]">${o.date}</span>
@@ -468,16 +428,22 @@
               ${o.current_time ? `<span class="text-term-muted text-[10px]">Now ${o.current_time}</span>` : ''}
             </div>
           </div>
-          ${timingLabel ? `<div class="px-4 py-1.5 border-b border-term-border/50 text-[10px] ${phaseCfg.color.split(' ')[1]}">${phaseCfg.icon} ${timingLabel}</div>` : ''}
-          <div class="p-4">
-            ${wuHTML}
-            ${confHTML}
-            ${marketHTML}
-            ${recoHTML}
-            ${bracketsHTML}
-            <div class="mt-3">
-              <button onclick="triggerScrape('${o.city_key}')" class="btn px-3 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Re-scrape</button>
+          <!-- Row 2: Timing (only when relevant) -->
+          ${timingLabel ? `<div class="px-3 py-1 border-b border-term-border/50 text-[10px] ${phaseCfg.color.split(' ')[1]}">${phaseCfg.icon} ${timingLabel}</div>` : ''}
+          <!-- Row 3: Data strip -->
+          <div class="px-3 py-1.5 border-b border-term-border/50 text-[10px] space-y-0.5">
+            <div class="text-term-muted">${wuStrip}</div>
+            <div class="text-term-muted">${bestLine}${matchLine}${confLine}</div>
+          </div>
+          <!-- Row 4: Action + brackets + re-scrape -->
+          <div class="px-3 py-2">
+            <div class="flex items-center gap-2">
+              <span class="${textClass} font-bold text-[11px] font-display shrink-0">${g.action}</span>
+              ${buyBtn}
+              <span class="text-[10px] text-term-muted truncate flex-1" title="${g.reason.replace(/"/g, '&quot;')}">${g.reason}</span>
+              <button onclick="triggerScrape('${o.city_key}')" class="btn px-2 py-0.5 rounded text-[9px] text-term-muted border border-term-border hover:text-term-cyan hover:border-term-cyan/30 shrink-0">Re-scrape</button>
             </div>
+            ${bracketsHTML}
           </div>
         </div>`;
     }

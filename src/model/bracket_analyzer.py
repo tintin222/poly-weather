@@ -40,6 +40,10 @@ class PeakGuidance:
     matching_bracket_id: int | None = None
     matching_token_id: str | None = None
 
+    # Best active bracket (highest market price > 2¢)
+    best_bracket: str | None = None
+    best_bracket_price: float = 0.0
+
     # Recommendation
     action: str = "WAIT"            # BUY, WAIT, SKIP, NO_DATA
     reason: str = ""
@@ -144,6 +148,13 @@ def generate_peak_guidance(
             for b in brackets
         ],
     )
+
+    # Compute best active bracket (highest market price > 2¢) — runs unconditionally
+    active = [(b["label"], b["yes_price"]) for b in guidance.brackets if b.get("yes_price", 0) > 0.02]
+    if active:
+        best_label, best_price = max(active, key=lambda x: x[1])
+        guidance.best_bracket = best_label
+        guidance.best_bracket_price = best_price
 
     # No observations yet
     if not observations or len(observations) < 2:

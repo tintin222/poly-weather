@@ -157,7 +157,12 @@ class MarketMonitor:
 
             # Resolve each pending bet
             for bet in pending_bets:
-                won = 1 if bet["bracket_label"] == winning_label else 0
+                side = bet["side"] if "side" in bet.keys() else "BUY_YES"
+                if side == "BUY_NO":
+                    # NO token wins when the bracket does NOT resolve as winner
+                    won = 1 if bet["bracket_label"] != winning_label else 0
+                else:
+                    won = 1 if bet["bracket_label"] == winning_label else 0
                 pnl = (bet["size"] - bet["cost"]) if won else (-bet["cost"])
                 self._market_repo.resolve_bet(bet["id"], won, pnl)
                 resolved_count += 1
@@ -166,6 +171,7 @@ class MarketMonitor:
                     bet_id=bet["id"],
                     city=bet["city_key"],
                     bracket=bet["bracket_label"],
+                    side=side,
                     winner=winning_label,
                     won=bool(won),
                     pnl=round(pnl, 2),

@@ -46,6 +46,7 @@
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-muted hover:text-term-text">URLs</a>
       </nav>
     </div>
   </header>
@@ -95,16 +96,35 @@
         <div class="text-xl font-bold text-term-cyan font-display" id="stat-total">--</div>
       </div>
       <div class="card rounded-md p-3">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Avg Temp</div>
-        <div class="text-xl font-bold text-term-amber font-display" id="stat-avg">--</div>
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Avg Peak Hour</div>
+        <div class="text-xl font-bold text-term-amber font-display" id="stat-avg-peak-hour">--</div>
       </div>
       <div class="card rounded-md p-3">
-        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Min Temp</div>
-        <div class="text-xl font-bold text-term-bright font-display" id="stat-min">--</div>
+        <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Avg Peak Temp</div>
+        <div class="text-xl font-bold text-term-bright font-display" id="stat-avg-peak-temp">--</div>
       </div>
       <div class="card rounded-md p-3">
         <div class="text-term-muted text-[10px] uppercase tracking-wider mb-1">Max Temp</div>
         <div class="text-xl font-bold text-term-red font-display" id="stat-max">--</div>
+      </div>
+    </div>
+
+    <!-- Active Market -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <h3 class="font-display font-semibold text-term-bright text-sm">Polymarket</h3>
+          <span class="text-term-muted text-[10px]" id="mkt-event-date"></span>
+          <span class="text-term-muted text-[10px]" id="mkt-event-status"></span>
+          <a id="mkt-pm-link" href="#" target="_blank" class="hidden px-1.5 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20">PM&nearr;</a>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-term-muted text-[10px]" id="mkt-updated-at"></span>
+          <button onclick="refreshCityMarket()" class="btn px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Refresh Prices</button>
+        </div>
+      </div>
+      <div id="mkt-content" class="p-4">
+        <div class="text-term-muted text-center py-4 text-[11px]">Loading...</div>
       </div>
     </div>
 
@@ -140,8 +160,9 @@
     <div class="card rounded-md">
       <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <h3 class="font-display font-semibold text-term-bright text-sm">Open-Meteo Live & Forecast</h3>
+          <h3 class="font-display font-semibold text-term-bright text-sm">Weather Sources — Live & Forecast</h3>
           <span class="text-[10px] text-term-muted" id="om-fetched-at"></span>
+          <span class="text-[10px] text-term-amber opacity-70" id="wu-fc-fetched-at"></span>
         </div>
         <button onclick="loadOpenMeteo()" class="btn px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">Refresh</button>
       </div>
@@ -153,10 +174,11 @@
 
       <!-- Chart: actual (solid) + forecast (dashed) -->
       <div class="px-4 pb-3">
-        <div class="flex items-center gap-4 text-[10px] text-term-muted mb-2">
+        <div class="flex items-center gap-4 text-[10px] text-term-muted mb-2 flex-wrap">
           <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-cyan"></span> OM Actual</span>
           <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 border-t-2 border-dashed border-term-purple"></span> OM Forecast</span>
           <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-amber"></span> WU Actual</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 border-t-2 border-dashed border-term-amber"></span> WU Forecast</span>
           <span class="flex items-center gap-1"><span class="inline-block w-6 h-0.5 bg-term-green"></span> METAR (ASOS)</span>
         </div>
         <canvas id="om-chart" height="70"></canvas>
@@ -177,6 +199,7 @@
               <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
                 <th class="px-4 py-2">Hour</th>
                 <th class="px-2 py-2 text-right" style="color:#feb019">WU Temp</th>
+                <th class="px-2 py-2 text-right" style="color:#feb019;opacity:0.6">WU FC</th>
                 <th class="px-2 py-2 text-right" style="color:#00c8ff">OM Temp</th>
                 <th class="px-2 py-2 text-right" style="color:#00e396">METAR Temp</th>
                 <th class="px-2 py-2 text-right">Humidity</th>
@@ -186,7 +209,7 @@
               </tr>
             </thead>
             <tbody id="om-tbody">
-              <tr><td colspan="8" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
+              <tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
             </tbody>
           </table>
         </div>
@@ -199,7 +222,7 @@
         <div class="flex items-center justify-between flex-wrap gap-2">
           <div>
             <h3 class="font-display font-semibold text-term-bright text-sm">Daily Peak Temperatures</h3>
-            <span class="text-term-muted text-[10px]">WU · peak hour(s) per day — consecutive ties shown</span>
+            <span class="text-term-muted text-[10px]">WU · peak hour(s) per day — with <span class="text-term-cyan">METAR</span> &amp; <span class="text-term-purple">Open-Meteo</span> temps at same hour (diff vs WU)</span>
           </div>
           <div class="flex items-center gap-2 flex-wrap">
             <input type="date" id="filter-from" placeholder="From">
@@ -216,7 +239,10 @@
             <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
               <th class="px-4 py-2">Date</th>
               <th class="px-2 py-2">Hour</th>
-              <th class="px-2 py-2 text-right">Peak Temp</th>
+              <th class="px-2 py-2 text-right">WU Peak</th>
+              <th class="px-2 py-2 text-right text-term-amber">Summary High</th>
+              <th class="px-2 py-2 text-right text-term-cyan">METAR</th>
+              <th class="px-2 py-2 text-right text-term-purple">Open-Meteo</th>
               <th class="px-2 py-2 text-right">Dew Pt</th>
               <th class="px-2 py-2 text-right">Humidity</th>
               <th class="px-2 py-2">Wind Dir</th>
@@ -226,7 +252,7 @@
             </tr>
           </thead>
           <tbody id="hourly-tbody">
-            <tr><td colspan="9" class="px-4 py-8 text-center text-term-muted">Loading...</td></tr>
+            <tr><td colspan="12" class="px-4 py-8 text-center text-term-muted">Loading...</td></tr>
           </tbody>
         </table>
       </div>
@@ -240,6 +266,29 @@
       </div>
       <div class="p-4" id="ml-section">
         <div class="text-term-muted text-center py-4">Loading model results...</div>
+      </div>
+    </div>
+
+    <!-- AI Analysis -->
+    <div class="card rounded-md">
+      <div class="px-4 py-2.5 border-b border-term-border flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <h3 class="font-display font-semibold text-term-bright text-sm">AI Bracket Analysis</h3>
+          <span class="text-[10px] text-term-muted" id="ai-model-tag"></span>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="runAIAnalysis(false)" id="ai-analyze-btn"
+            class="btn px-3 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">
+            Analyze
+          </button>
+          <button onclick="runAIAnalysis(true)" id="ai-execute-btn"
+            class="btn px-3 py-1 rounded bg-term-green/10 text-term-green border border-term-green/20 text-[10px]">
+            Analyze &amp; Bet
+          </button>
+        </div>
+      </div>
+      <div id="ai-section" class="p-4">
+        <div class="text-term-muted text-center py-4 text-[11px]">Click "Analyze" to get Claude's multi-bracket betting recommendation.</div>
       </div>
     </div>
 
@@ -258,6 +307,14 @@
     let filterFrom = '';
     let filterTo = '';
 
+    function timeAgo(ts) {
+      if (!ts) return 'never';
+      const s = Math.round(Date.now() / 1000 - ts);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.round(s/60)}m ago`;
+      return `${Math.round(s/3600)}h ago`;
+    }
+
     function showStatus(msg, color='text-term-cyan') {
       const bar = document.getElementById('status-bar');
       const el = document.getElementById('status-msg');
@@ -272,9 +329,10 @@
       const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/stats`);
       const d = await res.json();
       const fmt = v => v != null ? parseFloat(v).toFixed(1) + U : '--';
+      const fmtHour = v => v != null ? `${Math.floor(v)}:${String(Math.round((v % 1) * 60)).padStart(2, '0')}` : '--';
       document.getElementById('stat-total').textContent = (d.total_rows || 0).toLocaleString();
-      document.getElementById('stat-avg').textContent = fmt(d.avg_temp);
-      document.getElementById('stat-min').textContent = fmt(d.min_temp);
+      document.getElementById('stat-avg-peak-hour').textContent = fmtHour(d.avg_peak_hour);
+      document.getElementById('stat-avg-peak-temp').textContent = fmt(d.avg_peak_temp);
       document.getElementById('stat-max').textContent = fmt(d.max_temp);
     }
 
@@ -327,9 +385,19 @@
       document.getElementById('table-info').textContent = `${days} days · ${rows.length} rows`;
 
       const fmt = v => v != null ? parseFloat(v).toFixed(1) : '--';
+      const fmtSource = (v, wu) => {
+        if (v == null) return '<span class="text-term-muted">--</span>';
+        const diff = wu != null ? parseFloat(v) - parseFloat(wu) : null;
+        const color = diff == null ? 'text-term-text'
+                    : Math.abs(diff) < 0.5 ? 'text-term-green'
+                    : diff > 0 ? 'text-term-amber' : 'text-term-red';
+        const sign = diff != null && diff > 0 ? '+' : '';
+        const badge = diff != null ? ` <span class="text-[9px] opacity-60">(${sign}${diff.toFixed(1)})</span>` : '';
+        return `<span class="${color}">${parseFloat(v).toFixed(1)}${U}${badge}</span>`;
+      };
       const tbody = document.getElementById('hourly-tbody');
       if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-8 text-center text-term-muted">No data for selected range.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" class="px-4 py-8 text-center text-term-muted">No data for selected range.</td></tr>';
         return;
       }
 
@@ -338,10 +406,20 @@
       tbody.innerHTML = rows.map(r => {
         const showDate = r.date !== lastDate;
         lastDate = r.date;
+        const sh = r.summary_high_temp;
+        const wuPeak = r.temperature;
+        const summaryCell = sh == null
+          ? '<span class="text-term-muted">--</span>'
+          : sh > wuPeak
+            ? `<span class="text-term-amber font-bold">${parseFloat(sh).toFixed(1)}${U} <span class="text-[9px]">▲</span></span>`
+            : `<span class="text-term-text">${parseFloat(sh).toFixed(1)}${U}</span>`;
         return `<tr>
           <td class="px-4 py-1.5 ${showDate ? 'text-term-bright' : 'text-transparent select-none'}">${r.date}</td>
           <td class="px-2 py-1.5 text-term-muted">${String(r.hour).padStart(2,'0')}:00</td>
           <td class="px-2 py-1.5 text-right text-term-amber font-bold">${fmt(r.temperature)}${U}</td>
+          <td class="px-2 py-1.5 text-right">${summaryCell}</td>
+          <td class="px-2 py-1.5 text-right">${fmtSource(r.metar_temp, r.temperature)}</td>
+          <td class="px-2 py-1.5 text-right">${fmtSource(r.om_temp, r.temperature)}</td>
           <td class="px-2 py-1.5 text-right text-term-text">${fmt(r.dew_point)}</td>
           <td class="px-2 py-1.5 text-right text-term-text">${r.humidity != null ? fmt(r.humidity) + '%' : '--'}</td>
           <td class="px-2 py-1.5 text-term-muted">${r.wind_direction || '--'}</td>
@@ -655,10 +733,10 @@
         return;
       }
 
-      // Fetched-at timestamp
+      // Fetched-at timestamp (OM only — WU FC timestamp set after its fetch below)
       const fetchedAt = new Date(d.fetched_at);
       document.getElementById('om-fetched-at').textContent =
-        `updated ${fetchedAt.toLocaleTimeString()}`;
+        `OM ${fetchedAt.toLocaleTimeString()}`;
 
       // Current conditions
       const c = d.current;
@@ -714,6 +792,21 @@
         wuRows = wuData.rows || [];
       } catch (_) {}
 
+      // Fetch WU hourly forecast (cached by background scheduler)
+      let wuFcRows = [];
+      let wuFcFetchedAt = null;
+      try {
+        const wuFcRes = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/wu-forecast`);
+        const wuFcData = await wuFcRes.json();
+        wuFcRows = (wuFcData.data || []).filter(r => r.hour != null);
+        wuFcFetchedAt = wuFcData.fetched_at;
+        if (wuFcFetchedAt) {
+          const wuFcAt = new Date(wuFcFetchedAt * 1000);
+          document.getElementById('wu-fc-fetched-at').textContent =
+            `· WU FC ${wuFcAt.toLocaleTimeString()}`;
+        }
+      } catch (_) {}
+
       // Fetch METAR observations
       let metarRows = [];
       try {
@@ -738,6 +831,10 @@
       });
       const metarData = allHours.map((_, i) => {
         const row = metarRows.find(r => r.hour === i);
+        return row ? row.temperature : null;
+      });
+      const wuForecastData = allHours.map((_, i) => {
+        const row = wuFcRows.find(r => r.hour === i);
         return row ? row.temperature : null;
       });
 
@@ -780,6 +877,20 @@
               pointStyle: 'rectRot',
               pointRadius: 4,
               borderWidth: 2,
+              tension: 0.3,
+              fill: false,
+              spanGaps: false,
+            },
+            {
+              label: `WU Forecast (${U})`,
+              data: wuForecastData,
+              borderColor: '#feb019',
+              backgroundColor: 'rgba(254,176,25,0.0)',
+              pointBackgroundColor: '#feb019',
+              pointStyle: 'circle',
+              pointRadius: 2,
+              borderDash: [5, 4],
+              borderWidth: 1.5,
               tension: 0.3,
               fill: false,
               spanGaps: false,
@@ -835,15 +946,19 @@
       const tbody = document.getElementById('om-tbody');
       const windUnit = d.unit === 'fahrenheit' ? 'mph' : 'km/h';
       const unifiedRows = allHours.map((label, i) => {
-        const wu   = wuRows.find(r => r.hour === i);
+        const wu    = wuRows.find(r => r.hour === i);
+        const wuFc  = wuFcRows.find(r => r.hour === i);
         const omAct = actualRows.find(r => r.hour === i);
         const omFc  = forecastRows.find(r => r.hour === i);
         const om    = omAct || omFc;
         const metar = metarRows.find(r => r.hour === i);
-        if (!wu && !om && !metar) return null;
+        if (!wu && !wuFc && !om && !metar) return null;
 
         const wuCell = wu
           ? `<span class="text-term-amber font-medium">${fmt1(wu.temperature)}${U}</span>`
+          : '<span class="text-term-muted">--</span>';
+        const wuFcCell = wuFc
+          ? `<span style="color:#feb019;opacity:0.7">${fmt1(wuFc.temperature)}${U}<span class="text-[9px] opacity-50 ml-0.5">fc</span></span>`
           : '<span class="text-term-muted">--</span>';
         const omColor = (omFc && !omAct) ? 'text-term-purple' : 'text-term-cyan';
         const omCell = om
@@ -854,16 +969,18 @@
           : '<span class="text-term-muted">--</span>';
 
         const humidity = wu?.humidity != null ? fmt1(wu.humidity) + '%'
+                       : wuFc?.humidity != null ? fmt1(wuFc.humidity) + '%'
                        : om?.humidity  != null ? fmt1(om.humidity)  + '%' : '--';
         const dewPt = wu?.dew_point != null ? fmt1(wu.dew_point) + U : '--';
         const wind  = wu
           ? `${fmt1(wu.wind_speed)} ${windUnit} ${wu.wind_direction || ''}`
           : om ? `${fmt1(om.wind_speed)} ${windUnit}` : '--';
-        const condition = wu?.condition || om?.condition || metar?.condition || '--';
+        const condition = wu?.condition || wuFc?.condition || om?.condition || metar?.condition || '--';
 
         return `<tr>
           <td class="px-4 py-1 text-term-muted">${label}</td>
           <td class="px-2 py-1 text-right">${wuCell}</td>
+          <td class="px-2 py-1 text-right">${wuFcCell}</td>
           <td class="px-2 py-1 text-right">${omCell}</td>
           <td class="px-2 py-1 text-right">${metarCell}</td>
           <td class="px-2 py-1 text-right text-term-text">${humidity}</td>
@@ -875,11 +992,243 @@
 
       tbody.innerHTML = unifiedRows.length
         ? unifiedRows.join('')
-        : '<tr><td colspan="8" class="px-4 py-6 text-center text-term-muted">No data.</td></tr>';
+        : '<tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">No data.</td></tr>';
+    }
+
+    // ---- Polymarket Market ----
+    async function loadMarket() {
+      const res = await fetch(`/api/city/${encodeURIComponent(CITY_KEY)}/market`);
+      const data = await res.json();
+      renderMarket(data);
+    }
+
+    function renderMarket(data) {
+      const content = document.getElementById('mkt-content');
+      if (!data.event) {
+        content.innerHTML = '<div class="text-term-muted text-center py-4 text-[11px]">No market found — run Refresh Markets to discover events.</div>';
+        return;
+      }
+      const ev = data.event;
+      const brackets = data.brackets;
+      const bets = data.bets;
+
+      document.getElementById('mkt-event-date').textContent = ev.date;
+      const statusColors = { active: 'text-term-green', closed: 'text-term-muted', resolved: 'text-term-amber' };
+      document.getElementById('mkt-event-status').innerHTML =
+        `<span class="${statusColors[ev.status] || 'text-term-muted'}">${ev.status}</span>` +
+        (ev.winning_bracket ? ` · Winner: <span class="text-term-green font-bold">${ev.winning_bracket}</span>` : '');
+      if (ev.slug) {
+        const link = document.getElementById('mkt-pm-link');
+        link.href = `https://polymarket.com/event/${ev.slug}`;
+        link.classList.remove('hidden');
+      }
+      if (ev.updated_at) {
+        document.getElementById('mkt-updated-at').textContent = timeAgo(ev.updated_at);
+      }
+
+      if (!brackets.length) {
+        content.innerHTML = '<div class="text-term-muted text-[11px]">No brackets loaded yet — click Refresh Prices.</div>';
+        return;
+      }
+
+      // Index bets by bracket_label
+      const betsByLabel = {};
+      bets.forEach(b => {
+        if (!betsByLabel[b.bracket_label]) betsByLabel[b.bracket_label] = [];
+        betsByLabel[b.bracket_label].push(b);
+      });
+
+      const maxPrice = Math.max(...brackets.map(b => b.current_yes_price || 0), 0.01);
+      const settled = ev.status !== 'active';
+
+      let html = '<div class="space-y-0.5">';
+      brackets.forEach(b => {
+        const price = b.current_yes_price || 0;
+        const pct = (price * 100).toFixed(0);
+        const barW = Math.max((price / maxPrice) * 100, 1);
+        const isWinner = ev.winning_bracket && ev.winning_bracket === b.bracket_label;
+        const priceColor = price >= 0.85 ? 'text-term-green' : price >= 0.5 ? 'text-term-amber' : price >= 0.05 ? 'text-term-bright' : 'text-term-muted';
+        const myBets = betsByLabel[b.bracket_label] || [];
+        const totalCost = myBets.reduce((s, x) => s + (x.cost || 0), 0);
+        const totalShares = myBets.reduce((s, x) => s + (x.size || 0), 0);
+        const rowBg = isWinner ? 'bg-term-green/5 border border-term-green/20 rounded' : '';
+
+        html += `<div class="flex items-center gap-2 py-1 px-2 ${rowBg}">`;
+        html += `<span class="w-28 text-[11px] text-term-bright truncate shrink-0" title="${b.bracket_label}">${b.bracket_label}</span>`;
+        html += `<div class="flex-1 h-2 bg-term-bg rounded-sm overflow-hidden min-w-[60px]">
+          <div class="h-full rounded-sm bg-term-cyan/30" style="width:${barW}%"></div>
+        </div>`;
+        html += `<span class="w-10 text-right text-[11px] ${priceColor} font-bold shrink-0">${pct}¢</span>`;
+        // My position
+        if (myBets.length) {
+          html += `<span class="text-[10px] text-term-green shrink-0 w-32 text-right">↑ $${totalCost.toFixed(2)} · ${totalShares.toFixed(1)} sh</span>`;
+        } else {
+          html += `<span class="w-32 shrink-0"></span>`;
+        }
+        // Buy button
+        if (!settled && b.clob_token_id_yes && price > 0) {
+          html += `<div class="flex items-center gap-1 shrink-0">
+            <input type="number" id="city-buy-amt-${b.id}" value="10" min="1" step="1"
+              style="background:#0a0e14;border:1px solid #1a2030;color:#c5d4e8;padding:2px 4px;border-radius:4px;font-family:inherit;font-size:10px;width:48px;text-align:right">
+            <button onclick='buyBracketCity(${JSON.stringify({
+              event_id: ev.event_id, bracket_id: b.id, token_id: b.clob_token_id_yes,
+              price: price, bracket_label: b.bracket_label, date: ev.date
+            })})' class="btn px-2 py-0.5 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px]">
+              Buy ${pct}¢
+            </button>
+          </div>`;
+        }
+        html += `</div>`;
+      });
+      html += '</div>';
+
+      // Volume / liquidity footer
+      if (ev.total_volume || ev.total_liquidity) {
+        html += `<div class="mt-2 text-[10px] text-term-muted">`;
+        if (ev.total_volume) html += `Vol: $${parseFloat(ev.total_volume).toLocaleString(undefined, {maximumFractionDigits:0})}`;
+        if (ev.total_liquidity) html += `  Liq: $${parseFloat(ev.total_liquidity).toLocaleString(undefined, {maximumFractionDigits:0})}`;
+        html += `</div>`;
+      }
+
+      content.innerHTML = html;
+    }
+
+    async function buyBracketCity(params) {
+      const amt = parseFloat(document.getElementById(`city-buy-amt-${params.bracket_id}`)?.value || 10);
+      const size = Math.round(amt / params.price * 100) / 100;
+      const cost = (params.price * size).toFixed(2);
+      if (!confirm(`Buy ${params.bracket_label} @ ${(params.price * 100).toFixed(0)}¢ — $${cost}?`)) return;
+      const qs = new URLSearchParams({
+        event_id: params.event_id, bracket_id: params.bracket_id,
+        token_id: params.token_id, price: params.price,
+        size, city_key: CITY_KEY, date: params.date,
+        bracket_label: params.bracket_label,
+        current_max_temp: 0, peak_hour: 0, model_confidence: 0, expected_value: 0,
+      }).toString();
+      const res = await fetch('/api/place-bet?' + qs, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        showStatus(`Bet placed: ${data.order_id}`, 3000);
+        await loadMarket();
+        await loadBets();
+      } else {
+        showStatus(`Failed: ${data.error_msg}`, 5000);
+      }
+    }
+
+    async function refreshCityMarket() {
+      showStatus('Refreshing market prices...');
+      await fetch('/api/refresh-markets', { method: 'POST' });
+      await loadMarket();
+      showStatus('Done', 2000);
+    }
+
+    // ---- AI Analysis ----
+    async function runAIAnalysis(execute = false) {
+      const section = document.getElementById('ai-section');
+      const analyzeBtn = document.getElementById('ai-analyze-btn');
+      const executeBtn = document.getElementById('ai-execute-btn');
+      analyzeBtn.disabled = true;
+      executeBtn.disabled = true;
+      analyzeBtn.textContent = 'Analyzing...';
+      section.innerHTML = `<div class="text-term-cyan text-center py-6 text-[11px] animate-pulse">
+        Claude is analyzing ${CITY_KEY} weather data...</div>`;
+
+      try {
+        const res = await fetch(
+          `/api/city/${encodeURIComponent(CITY_KEY)}/llm-analyze?execute=${execute}`,
+          { method: 'POST' }
+        );
+        const d = await res.json();
+        if (d.error) {
+          section.innerHTML = `<div class="text-term-red text-center py-4 text-[11px]">Error: ${d.error}</div>`;
+          return;
+        }
+
+        document.getElementById('ai-model-tag').textContent =
+          `${d.model} · ${d.today} ${String(d.current_hour).padStart(2,'0')}:00`;
+
+        const actionColor = a =>
+          a === 'BUY_YES' ? 'text-term-green' :
+          a === 'BUY_NO'  ? 'text-term-red'   : 'text-term-muted';
+        const actionBg = a =>
+          a === 'BUY_YES' ? 'bg-term-green/10 border-term-green/20' :
+          a === 'BUY_NO'  ? 'bg-term-red/10 border-term-red/20'     : 'bg-transparent border-term-border/30';
+        const confBar = c => {
+          const pct = Math.round(c * 100);
+          const col = c >= 0.80 ? '#00e396' : c >= 0.60 ? '#feb019' : '#8b9fc0';
+          return `<div class="flex items-center gap-2">
+            <div class="flex-1 bg-term-border/20 rounded-full h-1">
+              <div class="h-1 rounded-full" style="width:${pct}%;background:${col}"></div>
+            </div>
+            <span class="text-[9px] text-term-muted w-8 text-right">${pct}%</span>
+          </div>`;
+        };
+
+        const recs = (d.recommendations || []).filter(r => r.action !== 'SKIP');
+        const skips = (d.recommendations || []).filter(r => r.action === 'SKIP');
+
+        const recRows = recs.map(r => `
+          <tr class="border-b border-term-border/20">
+            <td class="px-3 py-2 text-term-bright font-medium text-[11px]">${r.bracket}</td>
+            <td class="px-3 py-2">
+              <span class="px-2 py-0.5 rounded border text-[10px] font-bold ${actionColor(r.action)} ${actionBg(r.action)}">${r.action}</span>
+            </td>
+            <td class="px-3 py-2 text-term-text text-[11px]">${r.price != null ? (r.price * 100).toFixed(0) + '¢' : '--'}</td>
+            <td class="px-3 py-2 min-w-[80px]">${confBar(r.confidence)}</td>
+            <td class="px-3 py-2 text-term-muted text-[10px]">${r.reasoning}</td>
+          </tr>`).join('');
+
+        const skipList = skips.map(r =>
+          `<span class="text-term-muted text-[10px] px-2 py-0.5 rounded border border-term-border/20">${r.bracket}</span>`
+        ).join(' ');
+
+        const executedHtml = d.executed && d.executed.length > 0 ? `
+          <div class="mt-3 p-3 rounded border border-term-green/20 bg-term-green/5">
+            <div class="text-term-green text-[10px] font-bold mb-1">Bets Placed (${d.executed.length})</div>
+            ${d.executed.map(e => `
+              <div class="text-[10px] text-term-text">${e.bracket} — ${e.action} @ ${(e.price*100).toFixed(0)}¢, ${e.size} shares, $${e.cost.toFixed(2)} ${e.paper ? '(paper)' : '(LIVE)'}</div>
+            `).join('')}
+          </div>` : '';
+
+        section.innerHTML = `
+          <div class="space-y-3">
+            <div class="p-3 rounded bg-term-cyan/5 border border-term-cyan/10 text-[11px] text-term-text leading-relaxed">
+              <span class="text-term-cyan font-bold text-[10px] uppercase tracking-wider">Analysis · </span>
+              <span class="font-bold text-term-amber">${d.peak_temp_estimate != null ? d.peak_temp_estimate + U : '?'} peak</span>
+              (${Math.round(d.peak_confidence * 100)}% conf) — ${d.analysis}
+            </div>
+
+            <div class="overflow-auto">
+              <table class="w-full text-[11px]">
+                <thead>
+                  <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider border-b border-term-border">
+                    <th class="px-3 py-2">Bracket</th>
+                    <th class="px-3 py-2">Action</th>
+                    <th class="px-3 py-2">Price</th>
+                    <th class="px-3 py-2">Confidence</th>
+                    <th class="px-3 py-2">Reasoning</th>
+                  </tr>
+                </thead>
+                <tbody>${recRows || '<tr><td colspan="5" class="px-3 py-4 text-center text-term-muted">No actionable recommendations.</td></tr>'}</tbody>
+              </table>
+            </div>
+
+            ${skips.length ? `<div class="text-[10px] text-term-muted">Skipped: ${skipList}</div>` : ''}
+            ${executedHtml}
+          </div>`;
+      } catch (err) {
+        section.innerHTML = `<div class="text-term-red text-center py-4 text-[11px]">Error: ${err.message}</div>`;
+      } finally {
+        analyzeBtn.disabled = false;
+        executeBtn.disabled = false;
+        analyzeBtn.textContent = 'Analyze';
+      }
     }
 
     // ---- Init ----
     loadStats();
+    loadMarket();
     loadBets();
     loadHourly();
     loadMLResults();

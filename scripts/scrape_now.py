@@ -87,6 +87,14 @@ async def main() -> None:
     db.initialize()
     repo = WeatherRepository(db)
 
+    # Use DB-stored WU URL if available
+    import dataclasses
+    from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+    effective_path = get_effective_wu_url_path(city, db)
+    if effective_path != city.wu_url_path:
+        print(f"Using DB-stored WU URL path: {effective_path}")
+        city = dataclasses.replace(city, wu_url_path=effective_path)
+
     # Initialize scraper and run
     scraper = WUScraper(headless=True)
     try:

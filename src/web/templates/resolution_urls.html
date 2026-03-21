@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // resolution URLs</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono', 'monospace'],
+            display: ['Space Grotesk', 'sans-serif'],
+          },
+          colors: {
+            term: {
+              bg: '#0a0e14',
+              surface: '#0f1419',
+              border: '#1a2030',
+              muted: '#3d4f6a',
+              text: '#8b9fc0',
+              bright: '#c5d4e8',
+              green: '#00e396',
+              red: '#ff4560',
+              amber: '#feb019',
+              cyan: '#00c8ff',
+              purple: '#775dd0',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background: #0a0e14;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+      );
+    }
+    .card {
+      background: #0f1419;
+      border: 1px solid #1a2030;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0, 200, 255, 0.2), transparent);
+    }
+    table { border-collapse: separate; border-spacing: 0; }
+    thead th {
+      background: #111820;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid #1a2030;
+    }
+    tbody tr { transition: background 0.15s; }
+    tbody tr:hover { background: rgba(0, 200, 255, 0.03); }
+    tbody td { border-bottom: 1px solid rgba(26, 32, 48, 0.5); }
+    tbody tr.row-changed { background: rgba(254, 176, 25, 0.06); }
+    tbody tr.row-changed:hover { background: rgba(254, 176, 25, 0.1); }
+    .glow-cyan { text-shadow: 0 0 20px rgba(0, 200, 255, 0.3); }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-in { animation: slideUp 0.4s ease forwards; opacity: 0; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #0a0e14; }
+    ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3d4f6a; }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <!-- Header -->
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between animate-in" style="animation-delay: 0s">
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-2">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </div>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
+        <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-cyan">Resolution URLs</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-3">
+      <button id="btn-check-all"
+        class="px-3 py-1.5 rounded text-[11px] font-semibold bg-term-cyan/10 text-term-cyan border border-term-cyan/20 hover:bg-term-cyan/20 transition-colors">
+        Check All Now
+      </button>
+      <button id="btn-audit"
+        class="px-3 py-1.5 rounded text-[11px] font-semibold bg-term-purple/10 text-term-purple border border-term-purple/20 hover:bg-term-purple/20 transition-colors">
+        Audit vs Static
+      </button>
+    </div>
+  </header>
+
+  <main class="p-4 max-w-[1600px] mx-auto space-y-4">
+
+    <!-- Status bar -->
+    <div id="status-bar" class="hidden card rounded-md px-4 py-2 text-[11px]">
+      <span id="status-text" class="text-term-amber"></span>
+    </div>
+
+    <!-- Audit report -->
+    <div id="audit-panel" class="hidden card rounded-md p-4 animate-in">
+      <div class="text-term-muted text-[10px] uppercase tracking-wider mb-3">Audit Report — DB vs Static Config</div>
+      <div id="audit-content" class="space-y-1 text-[11px]"></div>
+    </div>
+
+    <!-- Main table -->
+    <div class="card rounded-md animate-in" style="animation-delay: 0.05s">
+      <div class="px-4 py-3 border-b border-term-border flex items-center justify-between">
+        <div class="text-term-muted text-[10px] uppercase tracking-wider">WU Resolution URLs</div>
+        <div id="summary-line" class="text-[11px] text-term-muted"></div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead>
+            <tr class="text-left">
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider w-28">City</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider">WU Station (DB)</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider">WU Station (Static)</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider">WU URL</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider">METAR</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider">Open-Meteo</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider w-32">Last Checked</th>
+              <th class="px-4 py-2 text-term-muted font-medium text-[10px] uppercase tracking-wider w-24">Status</th>
+            </tr>
+          </thead>
+          <tbody id="url-table-body">
+            <tr>
+              <td colspan="8" class="px-4 py-8 text-center text-term-muted">Loading…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    const statusBar = document.getElementById('status-bar');
+    const statusText = document.getElementById('status-text');
+    const auditPanel = document.getElementById('audit-panel');
+    const auditContent = document.getElementById('audit-content');
+    const summaryLine = document.getElementById('summary-line');
+
+    function showStatus(msg, color = 'text-term-amber') {
+      statusText.className = color;
+      statusText.textContent = msg;
+      statusBar.classList.remove('hidden');
+    }
+
+    function fmtTs(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    }
+
+    function statusBadge(status) {
+      const map = {
+        ok:        ['OK',        'bg-term-green/10 text-term-green border-term-green/20'],
+        changed:   ['CHANGED',   'bg-term-amber/10 text-term-amber border-term-amber/20'],
+        unchecked: ['UNCHECKED', 'bg-term-muted/10 text-term-muted border-term-muted/20'],
+        not_found: ['NOT FOUND', 'bg-term-red/10 text-term-red border-term-red/20'],
+        error:     ['ERROR',     'bg-term-red/10 text-term-red border-term-red/20'],
+      };
+      const [label, cls] = map[status] || ['UNKNOWN', 'bg-term-muted/10 text-term-muted border-term-muted/20'];
+      return `<span class="px-1.5 py-0.5 rounded border text-[10px] font-semibold tracking-wider ${cls}">${label}</span>`;
+    }
+
+    function renderTable(data) {
+      const tbody = document.getElementById('url-table-body');
+      if (!data || data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-term-muted">No data</td></tr>';
+        return;
+      }
+
+      const changed = data.filter(r => r.status === 'changed').length;
+      const unchecked = data.filter(r => r.status === 'unchecked').length;
+      summaryLine.textContent = `${data.length} cities · ${changed} changed · ${unchecked} unchecked`;
+
+      tbody.innerHTML = data.map(r => {
+        const dbPath = r.wu_url_path_db || '—';
+        const staticPath = r.wu_url_path_static || '—';
+        const matchesMark = r.matches_static === true
+          ? '<span class="text-term-green">✓</span>'
+          : r.matches_static === false
+            ? '<span class="text-term-amber">≠</span>'
+            : '';
+        const prevRow = r.previous_url
+          ? `<div class="text-term-muted mt-0.5 text-[10px]">prev: ${r.previous_url}</div>`
+          : '';
+        const rowCls = r.status === 'changed' ? 'row-changed' : '';
+        const wuLink = r.wu_url
+          ? `<a href="${r.wu_url}" target="_blank" rel="noopener"
+               class="text-term-cyan hover:underline truncate max-w-[260px] inline-block"
+               title="${r.wu_url}">${r.wu_url}</a>`
+          : '<span class="text-term-muted">—</span>';
+        const slug = r.source_slug
+          ? `<div class="text-term-muted mt-0.5 text-[10px] truncate max-w-[260px]" title="${r.source_slug}">${r.source_slug}</div>`
+          : '';
+
+        const metarLink = r.metar_url
+          ? `<a href="${r.metar_url}" target="_blank" rel="noopener"
+               class="text-term-cyan hover:underline font-medium">${r.metar_station}</a>
+             <div class="text-term-muted text-[10px]">aviationweather.gov</div>`
+          : '<span class="text-term-muted">—</span>';
+
+        const omLink = r.open_meteo_url
+          ? `<a href="${r.open_meteo_url}" target="_blank" rel="noopener"
+               class="text-term-purple hover:underline">
+               ${r.lat},${r.lon}
+             </a>
+             <div class="text-term-muted text-[10px]">open-meteo.com</div>`
+          : '<span class="text-term-muted">—</span>';
+
+        return `<tr class="${rowCls}">
+          <td class="px-4 py-2 text-term-bright font-medium">${r.city_name}</td>
+          <td class="px-4 py-2">
+            <span class="${r.status === 'changed' ? 'text-term-amber' : 'text-term-text'}">${dbPath}</span>
+            ${prevRow}
+          </td>
+          <td class="px-4 py-2">
+            <span class="text-term-text">${staticPath}</span>
+            ${matchesMark ? `<span class="ml-1">${matchesMark}</span>` : ''}
+          </td>
+          <td class="px-4 py-2">
+            ${wuLink}
+            ${slug}
+          </td>
+          <td class="px-4 py-2">${metarLink}</td>
+          <td class="px-4 py-2">${omLink}</td>
+          <td class="px-4 py-2 text-term-muted whitespace-nowrap">
+            ${fmtTs(r.last_checked_at)}
+            ${r.check_count ? `<div class="text-[10px]">${r.check_count}x checked</div>` : ''}
+          </td>
+          <td class="px-4 py-2">${statusBadge(r.status)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function loadData() {
+      try {
+        const resp = await fetch('/api/resolution-urls');
+        const data = await resp.json();
+        renderTable(data);
+      } catch (e) {
+        showStatus('Failed to load data: ' + e.message, 'text-term-red');
+      }
+    }
+
+    document.getElementById('btn-check-all').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-check-all');
+      btn.disabled = true;
+      btn.textContent = 'Running…';
+      showStatus('Checking all cities…', 'text-term-amber');
+
+      try {
+        const resp = await fetch('/api/admin/check-resolution-urls', { method: 'POST' });
+        const { job_id } = await resp.json();
+
+        // Poll job status
+        const poll = setInterval(async () => {
+          const jr = await fetch(`/api/job/${job_id}`);
+          const job = await jr.json();
+          if (job.status === 'complete') {
+            clearInterval(poll);
+            const changed = job.changed || 0;
+            const notFound = job.not_found || 0;
+            showStatus(
+              `Done — ${job.total} cities checked, ${changed} changed, ${notFound} not found`,
+              'text-term-green',
+            );
+            btn.disabled = false;
+            btn.textContent = 'Check All Now';
+            await loadData();
+          } else if (job.status === 'error') {
+            clearInterval(poll);
+            showStatus('Check failed: ' + (job.error || 'unknown error'), 'text-term-red');
+            btn.disabled = false;
+            btn.textContent = 'Check All Now';
+          }
+        }, 2000);
+      } catch (e) {
+        showStatus('Request failed: ' + e.message, 'text-term-red');
+        btn.disabled = false;
+        btn.textContent = 'Check All Now';
+      }
+    });
+
+    document.getElementById('btn-audit').addEventListener('click', async () => {
+      try {
+        const resp = await fetch('/api/admin/fix-resolution-urls', { method: 'POST' });
+        const data = await resp.json();
+
+        auditPanel.classList.remove('hidden');
+        auditContent.innerHTML = [
+          `<div class="mb-2 text-term-text">
+             ${data.total} cities · <span class="text-term-red">${data.mismatches} mismatches</span>
+             · <span class="text-term-muted">${data.unchecked} unchecked</span>
+           </div>`,
+          ...data.report.map(r => {
+            const statusColor = r.status === 'match' ? 'text-term-green'
+              : r.status === 'mismatch' ? 'text-term-amber'
+              : 'text-term-muted';
+            const dbVal = r.db_path || '(none)';
+            return `<div class="flex gap-4 py-1 border-b border-term-border/30">
+              <span class="w-28 text-term-bright shrink-0">${r.city_name}</span>
+              <span class="${statusColor} w-20 shrink-0 uppercase text-[10px] font-semibold pt-px">${r.status}</span>
+              <span class="text-term-muted shrink-0 w-4">S:</span>
+              <span class="text-term-text">${r.static_path}</span>
+              <span class="text-term-muted shrink-0 w-4">DB:</span>
+              <span class="${r.status === 'mismatch' ? 'text-term-amber' : 'text-term-text'}">${dbVal}</span>
+            </div>`;
+          }),
+        ].join('');
+      } catch (e) {
+        showStatus('Audit failed: ' + e.message, 'text-term-red');
+      }
+    });
+
+    loadData();
+  </script>
+</body>
+</html>

@@ -9,7 +9,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from src.utils.logger import get_logger
 from src.weather.cities import CityConfig
-from src.weather.models import HourlyObservation
+from src.weather.models import DailyScrapeResult, HourlyObservation
 
 log = get_logger(__name__)
 
@@ -24,7 +24,8 @@ def _parse_time(time_str: str) -> tuple[int, str]:
       - 12-hour AM/PM: '1:30 PM' → (13, '13:30'), '11 AM' → (11, '11:00')
       - 24-hour: '15:00' → (15, '15:00'), '0:20' → (0, '00:20')
     """
-    time_str = time_str.strip()
+    # Normalize WU forecast page quirk: '10 :00 am' → '10:00 am'
+    time_str = time_str.strip().replace(" :", ":")
 
     # Try 12-hour AM/PM formats first (WU default for US locale)
     for fmt in ("%I:%M %p", "%I %p"):
@@ -177,8 +178,8 @@ class WUScraper:
 
     async def scrape_daily(
         self, city: CityConfig, date: str | None = None
-    ) -> list[HourlyObservation]:
-        """Scrape hourly observation data for a city on a given date.
+    ) -> DailyScrapeResult:
+        """Scrape hourly observation data + summary high temp for a city on a given date.
 
         Creates a temporary browser context with the city's timezone so
         that WU's JavaScript renders observation times in local time.
@@ -188,7 +189,10 @@ class WUScraper:
             date: Date string in YYYY-MM-DD format, or None for today.
 
         Returns:
-            List of HourlyObservation objects parsed from the page.
+            DailyScrapeResult with observations list and summary_high_temp.
+            summary_high_temp comes from the WU Summary Table "High Temp (Actual)"
+            and may be higher than max(observations) due to ASOS readings not
+            shown in the hourly table.
         """
         if not self._browser:
             raise RuntimeError("Scraper not started. Call .start() first.")
@@ -220,10 +224,11 @@ class WUScraper:
                     await page.wait_for_selector("table tbody tr", timeout=15000)
                 except Exception:
                     log.error("no_table_found", city=city.key, date=date)
-                    return []
+                    return DailyScrapeResult(observations=[], summary_high_temp=None)
 
-            # Extract table data using JavaScript for reliability
+            # Extract hourly observations and summary high from the same page load
             observations = await self._extract_observations(page, city)
+            summary_high_temp = await self._extract_summary_high(page, city)
 
             # WU returns Fahrenheit by default. Convert to Celsius for
             # cities that resolve in Celsius on Polymarket.
@@ -236,11 +241,12 @@ class WUScraper:
                 date=date or "today",
                 observations=len(observations),
                 unit=city.unit,
+                summary_high=summary_high_temp,
             )
-            return observations
+            return DailyScrapeResult(observations=observations, summary_high_temp=summary_high_temp)
         except Exception as exc:
             log.error("scrape_failed", city=city.key, date=date, error=str(exc))
-            return []
+            return DailyScrapeResult(observations=[], summary_high_temp=None)
         finally:
             await page.close()
             await city_ctx.close()
@@ -335,6 +341,77 @@ class WUScraper:
 
         return observations
 
+    async def _extract_summary_high(
+        self, page: Page, city: CityConfig
+    ) -> float | None:
+        """Extract the WU Summary Table 'High Temp (Actual)' value.
+
+        This value aggregates ALL station readings including ASOS reports not
+        shown in the hourly observations table. It's what Polymarket uses for
+        resolution and may be higher than max(observations.temperature).
+
+        Returns temperature in city's unit, or None if extraction fails.
+        """
+        try:
+            raw_value = await page.evaluate("""
+                () => {
+                    // Strategy 1: find a table row whose first cell says "High Temp"
+                    const tables = document.querySelectorAll('table');
+                    for (const table of tables) {
+                        const rows = table.querySelectorAll('tr');
+                        for (const row of rows) {
+                            const cells = row.querySelectorAll('td, th');
+                            if (cells.length >= 2) {
+                                const label = cells[0].textContent.trim().toLowerCase();
+                                if (label.includes('high temp')) {
+                                    return cells[1].textContent.trim();
+                                }
+                            }
+                        }
+                    }
+
+                    // Strategy 2: walk all td/th for a "High Temp" label, get next sibling
+                    const allCells = document.querySelectorAll('td, th');
+                    for (const cell of allCells) {
+                        const label = cell.textContent.trim().toLowerCase();
+                        if (label.includes('high temp')) {
+                            const next = cell.nextElementSibling;
+                            if (next && next.textContent.trim()) {
+                                return next.textContent.trim();
+                            }
+                            const row = cell.closest('tr');
+                            if (row) {
+                                const rowCells = row.querySelectorAll('td, th');
+                                if (rowCells.length >= 2) {
+                                    return rowCells[1].textContent.trim();
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                }
+            """)
+
+            if raw_value is None:
+                log.debug("summary_high_not_found", city=city.key)
+                return None
+
+            value = _strip_numeric(raw_value)
+            if value is None:
+                log.debug("summary_high_no_numeric", city=city.key, raw=raw_value)
+                return None
+
+            # WU page renders in Fahrenheit (locale=en-US). Convert for Celsius cities.
+            if city.unit == "celsius":
+                value = _fahrenheit_to_celsius(value)
+
+            log.debug("summary_high_extracted", city=city.key, raw=raw_value, value=value)
+            return value
+
+        except Exception as exc:
+            log.warning("summary_high_extraction_failed", city=city.key, error=str(exc))
+            return None
+
     @staticmethod
     def _convert_to_celsius(observations: list[HourlyObservation]) -> list[HourlyObservation]:
         """Convert temperature and dew point from Fahrenheit to Celsius."""
@@ -417,6 +494,146 @@ class WUScraper:
         except Exception as exc:
             log.warning("forecast_scrape_failed", city=city.key, error=str(exc))
             return None
+        finally:
+            await page.close()
+            await city_ctx.close()
+
+    async def scrape_forecast_hourly(self, city: CityConfig) -> list[dict]:
+        """Scrape the WU hourly forecast page and return per-hour forecast data.
+
+        Args:
+            city: CityConfig for the target city.
+
+        Returns:
+            List of dicts with keys: hour, time_local, temperature, feels_like,
+            humidity, condition, wind_speed. Temperature in city's unit.
+            Returns [] on failure.
+        """
+        if not self._browser:
+            raise RuntimeError("Scraper not started. Call .start() first.")
+
+        url = f"{FORECAST_URL}/{city.wu_url_path}"
+        log.info("scraping_forecast_hourly", city=city.key, url=url)
+
+        city_ctx = await self._create_city_context(city)
+        page = await city_ctx.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            try:
+                await page.wait_for_selector("table", timeout=15000)
+            except Exception:
+                log.warning("forecast_hourly_no_table", city=city.key)
+                return []
+
+            table_data = await page.evaluate("""
+                () => {
+                    const tables = document.querySelectorAll('table');
+                    let targetTable = null;
+                    for (const table of tables) {
+                        const headers = Array.from(table.querySelectorAll('thead th, thead td'))
+                            .map(h => h.textContent.trim().toLowerCase());
+                        if (headers.some(h => h.includes('time')) &&
+                            headers.some(h => h.includes('temp'))) {
+                            targetTable = table;
+                            break;
+                        }
+                    }
+                    if (!targetTable) {
+                        // Fallback: largest table
+                        let maxRows = 0;
+                        for (const table of tables) {
+                            const rows = table.querySelectorAll('tbody tr');
+                            if (rows.length > maxRows) {
+                                maxRows = rows.length;
+                                targetTable = table;
+                            }
+                        }
+                    }
+                    if (!targetTable) return { headers: [], rows: [] };
+
+                    const headers = Array.from(
+                        targetTable.querySelectorAll('thead th, thead td')
+                    ).map(h => h.textContent.trim());
+
+                    const bodyRows = targetTable.querySelectorAll('tbody tr');
+                    const rows = [];
+                    for (const row of bodyRows) {
+                        const cells = row.querySelectorAll('td');
+                        const cellTexts = Array.from(cells).map(c => c.textContent.trim());
+                        if (cellTexts.length > 0 && cellTexts.some(t => t !== '')) {
+                            rows.push(cellTexts);
+                        }
+                    }
+                    return { headers, rows };
+                }
+            """)
+
+            headers = table_data.get("headers", [])
+            rows = table_data.get("rows", [])
+
+            if not rows:
+                log.warning("forecast_hourly_no_rows", city=city.key)
+                return []
+
+            col_map = self._map_columns(headers)
+            # Check for a "feels like" column not covered by _map_columns
+            feels_col: int | None = None
+            for i, h in enumerate(headers):
+                if "feel" in h.lower():
+                    feels_col = i
+                    break
+
+            result = []
+            for row_cells in rows:
+                def get(key: str) -> str:
+                    idx = col_map.get(key)
+                    if idx is not None and idx < len(row_cells):
+                        return row_cells[idx]
+                    return ""
+
+                time_str = get("time")
+                if not time_str:
+                    continue
+                temp_str = get("temperature")
+                temp = _strip_numeric(temp_str)
+                if temp is None:
+                    continue
+
+                hour, time_24h = _parse_time(time_str)
+                feels_raw = row_cells[feels_col] if feels_col is not None and feels_col < len(row_cells) else ""
+                feels = _strip_numeric(feels_raw)
+                humidity = _strip_numeric(get("humidity"))
+                condition = get("condition") or None
+                if condition and condition.strip() in ("", "-", "--"):
+                    condition = None
+                wind_speed = _strip_numeric(get("wind_speed"))
+
+                if city.unit == "celsius":
+                    temp = _fahrenheit_to_celsius(temp)
+                    if feels is not None:
+                        feels = _fahrenheit_to_celsius(feels)
+
+                result.append({
+                    "hour": hour,
+                    "time_local": time_24h,
+                    "temperature": temp,
+                    "feels_like": feels,
+                    "humidity": humidity,
+                    "condition": condition,
+                    "wind_speed": wind_speed,
+                })
+
+            log.info(
+                "forecast_hourly_complete",
+                city=city.key,
+                rows=len(result),
+                unit=city.unit,
+            )
+            return result
+
+        except Exception as exc:
+            log.warning("forecast_hourly_failed", city=city.key, error=str(exc))
+            return []
         finally:
             await page.close()
             await city_ctx.close()

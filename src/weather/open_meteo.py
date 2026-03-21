@@ -16,6 +16,7 @@ from src.weather.cities import CityConfig
 log = get_logger(__name__)
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 CURRENT_VARS = [
     "temperature_2m",
@@ -122,3 +123,41 @@ async def fetch(city: CityConfig) -> dict:
         "unit": city.unit,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+async def fetch_historical(
+    city: CityConfig, start_date: str, end_date: str
+) -> dict[tuple[str, int], float]:
+    """Fetch historical hourly temperature from Open-Meteo archive API.
+
+    Returns a dict keyed by (date_str, hour_int) → temperature.
+    Only temperatures are fetched (lightweight single-variable request).
+    """
+    params: dict = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "start_date": start_date,
+        "end_date": end_date,
+        "hourly": "temperature_2m",
+        "timezone": city.timezone,
+    }
+    if city.unit == "fahrenheit":
+        params["temperature_unit"] = "fahrenheit"
+
+    log.info("open_meteo_archive_fetch", city=city.key, start=start_date, end=end_date)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(ARCHIVE_URL, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+    result: dict[tuple[str, int], float] = {}
+    times = data.get("hourly", {}).get("time", [])
+    temps = data.get("hourly", {}).get("temperature_2m", [])
+    for t, temp in zip(times, temps):
+        if temp is None:
+            continue
+        dt = datetime.fromisoformat(t)
+        result[(dt.strftime("%Y-%m-%d"), dt.hour)] = round(temp, 1)
+
+    log.info("open_meteo_archive_done", city=city.key, points=len(result))
+    return result

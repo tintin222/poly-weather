@@ -65,7 +65,7 @@ CITIES: dict[str, CityConfig] = {
         key="Toronto", display_name="Toronto",
         lat=43.6777, lon=-79.6248, unit="celsius",
         timezone="America/Toronto",
-        wu_station_id="CYYZ", wu_url_path="ca/toronto/CYYZ",
+        wu_station_id="CYYZ", wu_url_path="ca/mississauga/CYYZ",
     ),
     "London": CityConfig(
         key="London", display_name="London",
@@ -129,15 +129,15 @@ CITIES: dict[str, CityConfig] = {
     ),
     "Buenos Aires": CityConfig(
         key="Buenos Aires", display_name="Buenos Aires",
-        lat=-34.5592, lon=-58.4156, unit="celsius",
+        lat=-34.8222, lon=-58.5358, unit="celsius",
         timezone="America/Argentina/Buenos_Aires",
-        wu_station_id="SABE", wu_url_path="ar/buenos-aires/SABE",
+        wu_station_id="SAEZ", wu_url_path="ar/ezeiza/SAEZ",
     ),
     "Sao Paulo": CityConfig(
         key="Sao Paulo", display_name="Sao Paulo",
-        lat=-23.6273, lon=-46.6566, unit="celsius",
+        lat=-23.4356, lon=-46.4731, unit="celsius",
         timezone="America/Sao_Paulo",
-        wu_station_id="SBSP", wu_url_path="br/sao-paulo/SBSP",
+        wu_station_id="SBGR", wu_url_path="br/guarulhos/SBGR",
     ),
     "Wellington": CityConfig(
         key="Wellington", display_name="Wellington",

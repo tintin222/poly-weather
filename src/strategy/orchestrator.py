@@ -134,23 +134,40 @@ class Orchestrator:
 
     async def _scrape_and_evaluate(self, city: CityConfig, scraper: WUScraper) -> None:
         """Scrape today's WU data, then evaluate for betting."""
+        import dataclasses
+        from src.polymarket.resolution_url_checker import get_effective_wu_url_path
+
         today = today_in_tz(city.timezone)
         current_hour = current_hour_in_tz(city.timezone)
 
         if current_hour < 6 or current_hour > 22:
             return
 
+        # Use DB-stored WU URL if available
+        effective_path = get_effective_wu_url_path(city, self._db)
+        if effective_path != city.wu_url_path:
+            log.info("scrape_using_db_url", city=city.key, path=effective_path)
+            city = dataclasses.replace(city, wu_url_path=effective_path)
+
         # Scrape
-        obs_raw = await scraper.scrape_daily(city, today)
-        if obs_raw:
-            obs_dicts = [obs.to_dict() for obs in obs_raw]
+        result = await scraper.scrape_daily(city, today)
+        if result.observations:
+            obs_dicts = [obs.to_dict() for obs in result.observations]
             self._weather_repo.upsert_hourly_observations_batch(city.key, today, obs_dicts)
-            peak_obs = max(obs_raw, key=lambda o: o.temperature)
+            peak_obs = max(result.observations, key=lambda o: o.temperature)
             self._weather_repo.upsert_daily_peak(
                 city_key=city.key, date=today,
                 peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
-                observation_count=len(obs_raw),
+                observation_count=len(result.observations),
+                summary_high_temp=result.summary_high_temp,
             )
+            if result.summary_high_temp is not None and result.summary_high_temp > peak_obs.temperature:
+                log.info(
+                    "summary_high_exceeds_hourly",
+                    city=city.key,
+                    hourly_max=peak_obs.temperature,
+                    summary_high=result.summary_high_temp,
+                )
 
         # Evaluate
         await self._evaluate_city(city)
@@ -220,8 +237,13 @@ class Orchestrator:
         if not observations or len(observations) < 8:
             return
 
-        # Get current peak
+        # Get current peak from hourly observations
         max_temp, peak_hour = compute_current_max(observations)
+
+        # Upgrade to summary high if WU reports a higher official value
+        daily_peak_row = self._weather_repo.get_daily_peak(city.key, today)
+        summary_high = daily_peak_row["summary_high_temp"] if daily_peak_row else None
+        bracket_temp = max(max_temp, summary_high or 0.0)
 
         # Need historical data for confidence model
         hist_count = self._db.conn.execute(
@@ -247,13 +269,17 @@ class Orchestrator:
         import datetime as _dt
         _today_dt = _dt.date.today()
         _doy = _today_dt.timetuple().tm_yday
-        # 7-day rolling peak hour from DB
+        # Recent peak hours from DB (last 7 days for rolling avg + yesterday/2d for features)
         _past = self._db.conn.execute(
             """SELECT peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0
                ORDER BY date DESC LIMIT 7""",
             (city.key,),
         ).fetchall()
-        _rolling = float(sum(r["peak_hour"] for r in _past) / len(_past)) if _past else 14.0
+        _past_hours = [r["peak_hour"] for r in _past]
+        _rolling = float(sum(_past_hours) / len(_past_hours)) if _past_hours else 14.0
+        _peak_yesterday = float(_past_hours[0]) if len(_past_hours) >= 1 else 14.0
+        _peak_2d_ago    = float(_past_hours[1]) if len(_past_hours) >= 2 else 14.0
+        _peak_trend_3d  = float(_past_hours[0] - _past_hours[2]) / 2.0 if len(_past_hours) >= 3 else 0.0
         _obs_dicts = [dict(o) if not isinstance(o, dict) else o for o in observations]
         ml_prob = self._ml_trainer.predict_is_peak(
             city_key=city.key,
@@ -261,6 +287,9 @@ class Orchestrator:
             today_obs=_obs_dicts,
             rolling_peak_hour=_rolling,
             day_of_year=_doy,
+            peak_hour_yesterday=_peak_yesterday,
+            peak_hour_2d_ago=_peak_2d_ago,
+            peak_hour_trend_3d=_peak_trend_3d,
         )
 
         # Combined confidence: blend CDF (60%) and ML peak probability (40%)
@@ -285,7 +314,7 @@ class Orchestrator:
         # significantly more today, the peak hasn't arrived yet.
         forecast_high = await self._get_forecast_high(city, today)
         if forecast_high is not None:
-            gap = forecast_high - max_temp
+            gap = forecast_high - bracket_temp
             if gap > 3:
                 log.info("forecast_gate_skip", city=city.key,
                          current_max=max_temp, forecast_high=forecast_high, gap=round(gap, 1))
@@ -310,8 +339,8 @@ class Orchestrator:
                 for b in brackets
             ]
 
-            # Find bracket matching current peak
-            matching = find_bracket_for_temp(max_temp, bracket_list)
+            # Find bracket matching current peak (prefer summary high over hourly max)
+            matching = find_bracket_for_temp(bracket_temp, bracket_list)
             if not matching:
                 continue
 
@@ -366,7 +395,7 @@ class Orchestrator:
                 price=price,
                 size=size,
                 cost=cost,
-                current_max_temp=max_temp,
+                current_max_temp=bracket_temp,
                 peak_hour=peak_hour,
                 model_confidence=confidence,
                 expected_value=edge,

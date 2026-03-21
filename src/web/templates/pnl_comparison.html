@@ -44,6 +44,7 @@
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
         <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
         <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
+        <a href="/gemini-betting" class="text-term-muted hover:text-term-text">Gemini Bot</a>
         <a href="/pnl-comparison" class="text-term-amber">P&amp;L</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
@@ -69,7 +70,7 @@
       Loading...
     </div>
 
-    <div id="summary-grid" class="hidden grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div id="summary-grid" class="hidden grid grid-cols-1 md:grid-cols-3 gap-4">
       <!-- Claude card -->
       <div class="card rounded-lg p-4">
         <div class="flex items-center gap-2 mb-4">
@@ -145,6 +146,44 @@
           <span class="text-term-muted">ROI: <span id="g-roi" class="text-term-text">–</span></span>
         </div>
       </div>
+
+      <!-- Gemini card -->
+      <div class="card rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2.5 h-2.5 rounded-full bg-term-green"></div>
+          <h3 class="font-display font-semibold text-term-bright text-sm">Gemini Flash Lite</h3>
+          <span class="text-[10px] text-term-muted">gemini-3.1-flash-lite-preview</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL BETS</div>
+            <div id="m-total-bets" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL COST</div>
+            <div id="m-total-cost" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WINS / LOSSES</div>
+            <div id="m-wl" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WIN RATE</div>
+            <div id="m-win-rate" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">PENDING</div>
+            <div id="m-pending" class="text-base font-mono text-term-muted">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL P&amp;L</div>
+            <div id="m-pnl" class="text-base font-mono">–</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-3 border-t border-term-border flex gap-4 text-[11px]">
+          <span class="text-term-muted">ROI: <span id="m-roi" class="text-term-text">–</span></span>
+        </div>
+      </div>
     </div>
 
     <!-- Chart -->
@@ -154,6 +193,7 @@
         <div class="flex items-center gap-4 text-[10px]">
           <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-0.5 bg-term-cyan"></span> Claude</span>
           <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-0.5 bg-term-purple"></span> GPT</span>
+          <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-0.5 bg-term-green"></span> Gemini</span>
         </div>
       </div>
       <canvas id="pnl-chart" height="120"></canvas>
@@ -169,11 +209,11 @@
           <tr class="text-[10px] text-term-muted uppercase tracking-wide border-b border-term-border">
             <th class="px-4 py-2 text-left font-normal">Date</th>
             <th class="px-4 py-2 text-right font-normal">Claude Bets</th>
-            <th class="px-4 py-2 text-right font-normal">Claude Cost</th>
             <th class="px-4 py-2 text-right font-normal">Claude P&amp;L</th>
             <th class="px-4 py-2 text-right font-normal">GPT Bets</th>
-            <th class="px-4 py-2 text-right font-normal">GPT Cost</th>
             <th class="px-4 py-2 text-right font-normal">GPT P&amp;L</th>
+            <th class="px-4 py-2 text-right font-normal">Gemini Bets</th>
+            <th class="px-4 py-2 text-right font-normal">Gemini P&amp;L</th>
             <th class="px-4 py-2 text-right font-normal">Winner</th>
           </tr>
         </thead>
@@ -225,11 +265,13 @@
         const daily = data.daily || [];
 
         // Fill summary cards
-        const claudeRow = summary.find(r => r.llm_source === 'claude') || {};
-        const gptRow    = summary.find(r => r.llm_source === 'gpt') || {};
+        const claudeRow  = summary.find(r => r.llm_source === 'claude') || {};
+        const gptRow     = summary.find(r => r.llm_source === 'gpt') || {};
+        const geminiRow  = summary.find(r => r.llm_source === 'gemini') || {};
 
         fillCard('c', claudeRow);
         fillCard('g', gptRow);
+        fillCard('m', geminiRow);
 
         // Chart
         if (daily.length > 0) {
@@ -296,13 +338,15 @@
       const dates = [...dateSet].sort();
 
       // Cumulative per source
-      let cCum = 0, gCum = 0;
-      const cData = [], gData = [];
+      let cCum = 0, gCum = 0, mCum = 0;
+      const cData = [], gData = [], mData = [];
       for (const d of dates) {
         cCum += byDateSource[`${d}__claude`] || 0;
         gCum += byDateSource[`${d}__gpt`] || 0;
+        mCum += byDateSource[`${d}__gemini`] || 0;
         cData.push(cCum);
         gData.push(gCum);
+        mData.push(mCum);
       }
 
       const ctx = document.getElementById('pnl-chart').getContext('2d');
@@ -327,6 +371,16 @@
               data: gData,
               borderColor: '#775dd0',
               backgroundColor: 'rgba(119,93,208,0.05)',
+              borderWidth: 1.5,
+              pointRadius: 2,
+              tension: 0.3,
+              fill: true,
+            },
+            {
+              label: 'Gemini',
+              data: mData,
+              borderColor: '#00e396',
+              backgroundColor: 'rgba(0,227,150,0.05)',
               borderWidth: 1.5,
               pointRadius: 2,
               tension: 0.3,
@@ -387,14 +441,19 @@
       for (const d of dates) {
         const c = byDateSource[`${d}__claude`] || {};
         const g = byDateSource[`${d}__gpt`] || {};
+        const m = byDateSource[`${d}__gemini`] || {};
 
         const cPnl = parseFloat(c.pnl || 0);
         const gPnl = parseFloat(g.pnl || 0);
+        const mPnl = parseFloat(m.pnl || 0);
+        const anyBets = (c.bets || 0) + (g.bets || 0) + (m.bets || 0) > 0;
         let winner = '–';
-        if ((c.bets || 0) > 0 || (g.bets || 0) > 0) {
-          if (cPnl > gPnl) winner = '<span class="text-term-cyan">Claude</span>';
-          else if (gPnl > cPnl) winner = '<span class="text-term-purple">GPT</span>';
-          else winner = '<span class="text-term-muted">Tie</span>';
+        if (anyBets) {
+          const best = Math.max(cPnl, gPnl, mPnl);
+          if (best === cPnl && best > -Infinity) winner = '<span class="text-term-cyan">Claude</span>';
+          else if (best === gPnl) winner = '<span class="text-term-purple">GPT</span>';
+          else winner = '<span class="text-term-green">Gemini</span>';
+          if (cPnl === gPnl && gPnl === mPnl) winner = '<span class="text-term-muted">Tie</span>';
         }
 
         const tr = document.createElement('tr');
@@ -402,11 +461,11 @@
         tr.innerHTML = `
           <td class="px-4 py-2 text-term-muted">${d}</td>
           <td class="px-4 py-2 text-right text-term-text">${c.bets || 0}</td>
-          <td class="px-4 py-2 text-right text-term-muted">$${parseFloat(c.cost || 0).toFixed(2)}</td>
           <td class="px-4 py-2 text-right">${fmtPnl(c.pnl)}</td>
           <td class="px-4 py-2 text-right text-term-text">${g.bets || 0}</td>
-          <td class="px-4 py-2 text-right text-term-muted">$${parseFloat(g.cost || 0).toFixed(2)}</td>
           <td class="px-4 py-2 text-right">${fmtPnl(g.pnl)}</td>
+          <td class="px-4 py-2 text-right text-term-text">${m.bets || 0}</td>
+          <td class="px-4 py-2 text-right">${fmtPnl(m.pnl)}</td>
           <td class="px-4 py-2 text-right">${winner}</td>
         `;
         tbody.appendChild(tr);

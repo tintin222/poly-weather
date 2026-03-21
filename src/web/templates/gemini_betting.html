@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // Gemini Bot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } } .spin { animation: spin 1s linear infinite; }
+    .btn { transition: all 0.15s; } .btn:hover { filter: brightness(1.2); } .btn:active { transform: scale(0.97); }
+    .action-yes { background: rgba(0,227,150,0.12); color: #00e396; border: 1px solid rgba(0,227,150,0.25); }
+    .action-no  { background: rgba(255,69,96,0.12);  color: #ff4560; border: 1px solid rgba(255,69,96,0.25); }
+    .action-skip{ background: rgba(61,79,106,0.20);  color: #3d4f6a; border: 1px solid #1a2030; }
+    .conf-bar-bg { background: #1a2030; border-radius: 2px; height: 3px; }
+    .entry-row { border-top: 1px solid #1a2030; }
+    .entry-row:hover { background: rgba(255,255,255,0.015); }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
+        <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
+        <a href="/gemini-betting" class="text-term-green">Gemini Bot</a>
+        <a href="/pnl-comparison" class="text-term-muted hover:text-term-text">P&amp;L</a>
+        <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-muted hover:text-term-text">URLs</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-2 text-[10px] text-term-muted">
+      <span id="last-refresh">–</span>
+      <span>· auto-refresh 30s</span>
+    </div>
+  </header>
+
+  <main class="px-4 py-4 max-w-[1400px] mx-auto space-y-4">
+
+    <!-- Bot Control Panel -->
+    <div class="card rounded-lg p-4">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <div id="bot-status-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+          <h2 class="font-display font-semibold text-term-bright text-sm">Gemini Auto-Bet Bot</h2>
+          <span id="bot-status-label" class="text-[10px] text-term-muted px-2 py-0.5 rounded border border-term-border">STOPPED</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="toggle-btn" onclick="toggleBot()" class="btn px-4 py-1.5 rounded text-[11px] font-semibold border">
+            Enable Bot
+          </button>
+          <button onclick="loadStatus(); loadLog();" class="btn px-3 py-1.5 rounded bg-term-surface text-term-muted border border-term-border text-[11px]">Refresh</button>
+        </div>
+      </div>
+
+      <!-- Stats row -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <div class="bg-term-bg rounded p-3 border border-term-border">
+          <div class="text-[10px] text-term-muted mb-1">RUNS TODAY</div>
+          <div id="stat-runs" class="text-lg font-mono text-term-bright">–</div>
+        </div>
+        <div class="bg-term-bg rounded p-3 border border-term-border">
+          <div class="text-[10px] text-term-muted mb-1">BETS PLACED</div>
+          <div id="stat-bets" class="text-lg font-mono text-term-amber">–</div>
+        </div>
+        <div class="bg-term-bg rounded p-3 border border-term-border">
+          <div class="text-[10px] text-term-muted mb-1">ACTIVE CITIES</div>
+          <div id="stat-cities" class="text-lg font-mono text-term-green">–</div>
+        </div>
+        <div class="bg-term-bg rounded p-3 border border-term-border">
+          <div class="text-[10px] text-term-muted mb-1">CYCLE POSITION</div>
+          <div id="stat-cycle" class="text-lg font-mono text-term-green">–</div>
+        </div>
+      </div>
+
+      <!-- Bot details row -->
+      <div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px]">
+        <span class="text-term-muted">Last run: <span id="detail-last-run" class="text-term-text">–</span></span>
+        <span class="text-term-muted">Last city: <span id="detail-last-city" class="text-term-text">–</span></span>
+        <span class="text-term-muted">Interval: <span class="text-term-text">1 min / city</span></span>
+        <span id="error-row" class="hidden text-term-red">Error: <span id="detail-error"></span></span>
+      </div>
+
+      <!-- Active cities list -->
+      <div id="active-cities-row" class="hidden mt-3 pt-3 border-t border-term-border">
+        <span class="text-[10px] text-term-muted uppercase tracking-wide mr-2">Active cities:</span>
+        <span id="active-cities-list" class="text-term-text"></span>
+      </div>
+    </div>
+
+    <!-- Analysis Log -->
+    <div class="card rounded-lg overflow-hidden">
+      <div class="px-4 py-3 flex items-center justify-between border-b border-term-border">
+        <h2 class="font-display font-semibold text-term-bright text-sm">Analysis Log</h2>
+        <span class="text-[10px] text-term-muted">latest 50 · one city per minute · model: gemini-3.1-flash-lite-preview</span>
+      </div>
+
+      <div id="log-loading" class="px-4 py-8 text-center text-term-muted text-[11px]">
+        <div class="w-4 h-4 border border-term-muted border-t-transparent rounded-full spin mx-auto mb-2"></div>
+        Loading log...
+      </div>
+
+      <div id="log-empty" class="hidden px-4 py-8 text-center text-term-muted text-[11px]">
+        No Gemini analysis runs yet. Enable the bot to start automated Gemini analysis.
+      </div>
+
+      <div id="log-table" class="hidden">
+        <table class="w-full text-[11px]">
+          <thead>
+            <tr class="text-[10px] text-term-muted uppercase tracking-wide border-b border-term-border">
+              <th class="px-4 py-2 text-left font-normal w-28">Time</th>
+              <th class="px-4 py-2 text-left font-normal w-24">City</th>
+              <th class="px-4 py-2 text-left font-normal w-12">Hr</th>
+              <th class="px-4 py-2 text-left font-normal w-24">Peak Est.</th>
+              <th class="px-4 py-2 text-left font-normal">Analysis</th>
+              <th class="px-4 py-2 text-left font-normal w-44">Market Prices</th>
+              <th class="px-4 py-2 text-left font-normal w-56">Recommendations</th>
+              <th class="px-4 py-2 text-left font-normal w-44">Bet Placed</th>
+              <th class="px-4 py-2 text-center font-normal w-12">Count</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    let botEnabled = false;
+
+    function fmtDateTime(ts) {
+      if (!ts) return '–';
+      const d = new Date(ts * 1000);
+      return d.toLocaleString('en-GB', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+    }
+
+    function timeSince(ts) {
+      if (!ts) return '–';
+      const sec = Math.floor(Date.now() / 1000 - ts);
+      if (sec < 60) return `${sec}s ago`;
+      if (sec < 3600) return `${Math.floor(sec/60)}m ago`;
+      return `${Math.floor(sec/3600)}h ago`;
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/gemini-bot/status');
+        const s = await res.json();
+        botEnabled = s.enabled;
+
+        const dot = document.getElementById('bot-status-dot');
+        const lbl = document.getElementById('bot-status-label');
+        const btn = document.getElementById('toggle-btn');
+        if (s.enabled) {
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-term-green pulse-dot';
+          lbl.textContent = 'RUNNING';
+          lbl.className = 'text-[10px] text-term-green px-2 py-0.5 rounded border border-term-green/30 bg-term-green/10';
+          btn.textContent = 'Disable Bot';
+          btn.className = 'btn px-4 py-1.5 rounded text-[11px] font-semibold border border-term-red/30 bg-term-red/10 text-term-red';
+        } else {
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-term-muted';
+          lbl.textContent = 'STOPPED';
+          lbl.className = 'text-[10px] text-term-muted px-2 py-0.5 rounded border border-term-border';
+          btn.textContent = 'Enable Bot';
+          btn.className = 'btn px-4 py-1.5 rounded text-[11px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green';
+        }
+
+        document.getElementById('stat-runs').textContent = s.runs_today ?? '–';
+        document.getElementById('stat-bets').textContent = s.bets_today ?? '–';
+        document.getElementById('stat-cities').textContent = s.active_city_count ?? '–';
+        const cyclePos = s.active_city_count > 0
+          ? `${(s.city_index % s.active_city_count) + 1}/${s.active_city_count}`
+          : '–';
+        document.getElementById('stat-cycle').textContent = cyclePos;
+
+        document.getElementById('detail-last-run').textContent = s.last_run_at ? timeSince(s.last_run_at) : 'never';
+        document.getElementById('detail-last-city').textContent = s.last_city || '–';
+
+        const errRow = document.getElementById('error-row');
+        if (s.last_error) {
+          errRow.classList.remove('hidden');
+          document.getElementById('detail-error').textContent = s.last_error;
+        } else {
+          errRow.classList.add('hidden');
+        }
+
+        const citiesRow = document.getElementById('active-cities-row');
+        if (s.active_cities && s.active_cities.length > 0) {
+          citiesRow.classList.remove('hidden');
+          document.getElementById('active-cities-list').textContent = s.active_cities.join(', ');
+        } else {
+          citiesRow.classList.add('hidden');
+        }
+      } catch (e) {
+        console.error('Status load failed', e);
+      }
+    }
+
+    async function toggleBot() {
+      const newState = !botEnabled;
+      try {
+        await fetch(`/api/gemini-bot/toggle?enabled=${newState}`, { method: 'POST' });
+        await loadStatus();
+      } catch (e) {
+        console.error('Toggle failed', e);
+      }
+    }
+
+    function actionBadge(action) {
+      if (action === 'BUY_YES') return `<span class="action-yes px-1.5 py-0.5 rounded text-[9px] font-bold">YES</span>`;
+      if (action === 'BUY_NO')  return `<span class="action-no px-1.5 py-0.5 rounded text-[9px] font-bold">NO</span>`;
+      return `<span class="action-skip px-1.5 py-0.5 rounded text-[9px]">SKIP</span>`;
+    }
+
+    async function loadLog() {
+      const loading = document.getElementById('log-loading');
+      const empty   = document.getElementById('log-empty');
+      const table   = document.getElementById('log-table');
+      const tbody   = document.getElementById('log-body');
+
+      loading.classList.remove('hidden');
+      empty.classList.add('hidden');
+      table.classList.add('hidden');
+
+      try {
+        const res = await fetch('/api/gemini-bot/log?limit=50');
+        const data = await res.json();
+        const entries = data.log || [];
+
+        loading.classList.add('hidden');
+
+        if (entries.length === 0) {
+          empty.classList.remove('hidden');
+          return;
+        }
+
+        tbody.innerHTML = '';
+        for (const e of entries) {
+          const recs = e.recommendations || [];
+          const actionRecs = recs.filter(r => r.action !== 'SKIP');
+
+          let recsHtml = '';
+          if (actionRecs.length === 0) {
+            recsHtml = '<span class="text-term-muted text-[10px]">all SKIP</span>';
+          } else {
+            recsHtml = actionRecs.map(r => {
+              const pct = Math.round((r.confidence || 0) * 100);
+              return `<div class="flex items-center gap-1.5 mb-0.5">
+                ${actionBadge(r.action)}
+                <span class="text-term-text truncate max-w-[90px]" title="${r.bracket}">${r.bracket}</span>
+                <span class="text-term-muted ml-auto shrink-0">${pct}%</span>
+              </div>`;
+            }).join('');
+          }
+
+          const peakStr = e.peak_estimate != null
+            ? `${e.peak_estimate}° <span class="text-term-muted">(${Math.round((e.peak_confidence||0)*100)}%)</span>`
+            : '<span class="text-term-muted">–</span>';
+
+          const betsColor = e.bets_executed > 0 ? 'text-term-amber font-semibold' : 'text-term-muted';
+
+          const mktBrackets = e.market_brackets || [];
+          let mktHtml = '';
+          if (mktBrackets.length === 0) {
+            mktHtml = '<span class="text-term-muted text-[10px]">–</span>';
+          } else {
+            mktHtml = mktBrackets.map(m => {
+              const pct = Math.round((m.yes_price || 0) * 100);
+              const barW = Math.max(2, pct);
+              const barColor = pct >= 60 ? '#00e396' : pct >= 20 ? '#feb019' : '#3d4f6a';
+              const textColor = pct >= 60 ? 'text-term-green' : pct >= 20 ? 'text-term-amber' : 'text-term-muted';
+              return `<div class="flex items-center gap-1.5 mb-0.5">
+                <span class="text-term-text truncate shrink-0 w-[80px] text-[10px]" title="${m.label}">${m.label}</span>
+                <div class="flex-1 h-1.5 rounded-sm overflow-hidden" style="background:#1a2030;min-width:40px">
+                  <div style="width:${barW}%;height:100%;background:${barColor};border-radius:2px"></div>
+                </div>
+                <span class="${textColor} shrink-0 w-7 text-right text-[10px]">${pct}%</span>
+              </div>`;
+            }).join('');
+          }
+
+          const placedBets = e.placed_bets || [];
+          let placedHtml = '';
+          if (placedBets.length === 0) {
+            placedHtml = '<span class="text-term-muted text-[10px]">–</span>';
+          } else {
+            placedHtml = placedBets.map(b => {
+              const isYes = b.side === 'BUY_YES';
+              const cls = isYes ? 'action-yes' : 'action-no';
+              const sideLabel = isYes ? 'YES' : 'NO';
+              const priceStr = b.price != null ? Math.round(b.price * 100) + '%' : '';
+              return `<div class="flex items-center gap-1 mb-0.5">
+                <span class="${cls} px-1 py-0.5 rounded text-[9px] font-bold shrink-0">${sideLabel}</span>
+                <span class="text-term-bright truncate max-w-[80px]" title="${b.bracket_label}">${b.bracket_label}</span>
+                <span class="text-term-muted shrink-0">${priceStr}</span>
+                <span class="text-term-amber shrink-0 ml-auto">$${b.size}</span>
+              </div>`;
+            }).join('');
+          }
+
+          const spanId = `analysis-${e.id}`;
+          const tr = document.createElement('tr');
+          tr.className = 'entry-row align-top';
+          tr.innerHTML = `
+            <td class="px-4 py-2 text-term-muted whitespace-nowrap">${fmtDateTime(e.analysis_time)}</td>
+            <td class="px-4 py-2 text-term-green font-semibold">${e.city_key}</td>
+            <td class="px-4 py-2 text-term-text">${e.hour_local}:00</td>
+            <td class="px-4 py-2">${peakStr}</td>
+            <td class="px-4 py-2 text-term-text leading-relaxed max-w-xs cursor-pointer select-none"
+                onclick="toggleAnalysis('${spanId}')">
+              <span id="${spanId}" class="line-clamp-2">${e.analysis_text || '–'}</span>
+              <span class="text-[9px] text-term-muted block mt-0.5 expand-hint">▼ expand</span>
+            </td>
+            <td class="px-4 py-2 min-w-[160px]">${mktHtml}</td>
+            <td class="px-4 py-2">${recsHtml}</td>
+            <td class="px-4 py-2">${placedHtml}</td>
+            <td class="px-4 py-2 text-center ${betsColor}">${e.bets_executed}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+
+        table.classList.remove('hidden');
+        document.getElementById('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      } catch (e) {
+        loading.classList.add('hidden');
+        empty.classList.remove('hidden');
+        console.error('Log load failed', e);
+      }
+    }
+
+    function toggleAnalysis(spanId) {
+      const span = document.getElementById(spanId);
+      if (!span) return;
+      const hint = span.nextElementSibling;
+      const collapsed = span.classList.toggle('line-clamp-2');
+      if (hint) hint.textContent = collapsed ? '▼ expand' : '▲ collapse';
+    }
+
+    loadStatus();
+    loadLog();
+    setInterval(() => { loadStatus(); loadLog(); }, 30000);
+  </script>
+</body>
+</html>

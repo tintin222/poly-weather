@@ -65,6 +65,15 @@ _gpt_bot_state: dict = {
     "last_error": None,
 }
 
+_gemini_bot_state: dict = {
+    "enabled": False,
+    "city_keys": [],
+    "city_index": 0,
+    "last_run_at": 0.0,
+    "last_city": None,
+    "last_error": None,
+}
+
 
 def _tiered_bet_size(confidence: float, price: float) -> float:
     """Return USDC bet size based on confidence and edge. Returns 0.0 if below threshold.
@@ -2565,6 +2574,204 @@ async def startup():
         id="gpt_auto_bet",
     )
 
+    async def _run_gemini_auto_bet() -> None:
+        """Run Gemini analysis + auto-bet for one city per tick (round-robin, 45s offset)."""
+        from config import settings
+        from src.weather.cities import get_city, CITIES
+        from src.utils.time_utils import today_in_tz, current_hour_in_tz
+        from src.weather import open_meteo, metar as metar_mod
+        from src.strategy.gemini_advisor import analyze as gemini_analyze
+        from src.polymarket.trader import PolymarketTrader
+        import json as _json
+
+        if not _gemini_bot_state["enabled"]:
+            return
+        if not settings.gemini_api_key:
+            return
+
+        db = get_db()
+
+        if _gemini_bot_state["city_index"] == 0 or not _gemini_bot_state["city_keys"]:
+            active_keys: list[str] = []
+            for ck, city in CITIES.items():
+                today = today_in_tz(city.timezone)
+                import datetime as _dt4
+                tomorrow = (_dt4.date.fromisoformat(today) + _dt4.timedelta(days=1)).isoformat()
+                row = db.conn.execute(
+                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? AND date <= ? LIMIT 1",
+                    (ck, today, tomorrow),
+                ).fetchone()
+                if row:
+                    active_keys.append(ck)
+            _gemini_bot_state["city_keys"] = active_keys
+            if not active_keys:
+                return
+
+        city_keys = _gemini_bot_state["city_keys"]
+        if not city_keys:
+            return
+
+        idx = _gemini_bot_state["city_index"] % len(city_keys)
+        city_key = city_keys[idx]
+        _gemini_bot_state["city_index"] = (idx + 1) % len(city_keys)
+        _gemini_bot_state["last_city"] = city_key
+
+        city = get_city(city_key)
+        if not city:
+            return
+
+        today = today_in_tz(city.timezone)
+        current_hour = current_hour_in_tz(city.timezone)
+
+        try:
+            brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+            if not brackets:
+                return
+
+            wu_rows = db.conn.execute(
+                "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                (city_key, event_date),
+            ).fetchall()
+            wu_obs = [dict(r) for r in wu_rows]
+
+            peak_row = db.conn.execute(
+                "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                (city_key, event_date),
+            ).fetchone()
+            summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                peak_row["peak_temp"] if peak_row else None
+            )
+
+            wu_forecast = _wu_forecast_cache.get(city_key, [])
+
+            om_hourly: list[dict] = []
+            try:
+                om_data = await open_meteo.fetch(city)
+                om_hourly = om_data.get("hourly", [])
+            except Exception:
+                pass
+
+            metar_obs_list: list[dict] = []
+            try:
+                metar_data = await metar_mod.fetch(city, hours=24)
+                metar_obs_list = [
+                    {"hour": o["hour"], "temperature": o["temperature"]}
+                    for o in metar_data.get("observations", [])
+                    if o.get("date") == event_date
+                ]
+            except Exception:
+                pass
+
+            hist_peaks = db.conn.execute(
+                "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+                "ORDER BY date DESC LIMIT 14",
+                (city_key,),
+            ).fetchall()
+            peak_history = [dict(r) for r in hist_peaks]
+            avg_peak_row = db.conn.execute(
+                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                (city_key,),
+            ).fetchone()
+            avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
+
+            advice = await gemini_analyze(
+                api_key=settings.gemini_api_key,
+                city_name=city.display_name,
+                unit=city.unit,
+                today=event_date,
+                current_local_hour=current_hour,
+                wu_obs=wu_obs,
+                wu_forecast=wu_forecast,
+                om_hourly=om_hourly,
+                metar_obs=metar_obs_list,
+                summary_high=summary_high,
+                brackets=brackets,
+                peak_history=peak_history,
+                avg_peak_hour=avg_peak_hour,
+            )
+
+            executed_count = 0
+            trader = PolymarketTrader(settings)
+            for rec in advice.recommendations:
+                if rec.action == "SKIP" or not rec.token_id:
+                    continue
+                if rec.price <= 0.01:
+                    continue
+                if rec.action == "BUY_NO" and rec.price > 0.85:
+                    continue
+                if rec.action == "BUY_YES" and rec.price > 0.92:
+                    continue
+                bet_size = _tiered_bet_size(rec.confidence, rec.price)
+                if bet_size == 0.0:
+                    continue
+                existing = db.conn.execute(
+                    "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gemini' LIMIT 1",
+                    (city_key, event_date, rec.bracket_label, rec.action),
+                ).fetchone()
+                if existing:
+                    continue
+
+                size = round(bet_size / rec.price, 2)
+                cost = round(rec.price * size, 2)
+                order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                db.conn.execute(
+                    """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                       side, token_id, price, size, cost, order_id, order_status,
+                       current_max_temp, peak_hour, model_confidence, expected_value,
+                       is_paper, created_at, llm_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        rec.event_id, rec.bracket_db_id, city_key, event_date,
+                        rec.bracket_label, rec.action, rec.token_id,
+                        rec.price, size, cost,
+                        order.order_id, order.status,
+                        advice.peak_temp_estimate or 0.0,
+                        peak_row["peak_hour"] if peak_row else 0,
+                        rec.confidence, rec.confidence - rec.price,
+                        int(order.is_paper), int(time.time()), "gemini",
+                    ),
+                )
+                db.conn.commit()
+                executed_count += 1
+                log.info(
+                    "GEMINI_BOT_BET", city=city_key, bracket=rec.bracket_label,
+                    action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                    conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                )
+
+            recs_json = _json.dumps([
+                {"bracket": r.bracket_label, "action": r.action,
+                 "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
+                for r in advice.recommendations
+            ])
+            db.conn.execute(
+                """INSERT INTO llm_analysis_log
+                   (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
+                    analysis_text, recs_json, bets_executed, model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (city_key, event_date, int(time.time()), current_hour,
+                 advice.peak_temp_estimate, advice.peak_confidence,
+                 advice.analysis, recs_json, executed_count, advice.model),
+            )
+            db.conn.commit()
+
+            _gemini_bot_state["last_run_at"] = time.time()
+            _gemini_bot_state["last_error"] = None
+            log.info("gemini_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
+
+        except Exception as exc:
+            _gemini_bot_state["last_error"] = str(exc)
+            log.error("gemini_bot_tick_failed", city=city_key, error=str(exc))
+
+    _scheduler.add_job(
+        _run_gemini_auto_bet,
+        "interval",
+        minutes=1,
+        seconds=45,
+        id="gemini_auto_bet",
+    )
+
     _scheduler.start()
     log.info("scheduler_started")
 
@@ -2786,6 +2993,89 @@ async def api_gpt_bot_log(limit: int = 50):
         bet_rows = db.conn.execute(
             """SELECT bracket_label, side, size, price FROM bets
                WHERE city_key = ? AND date = ? AND llm_source = 'gpt'
+                 AND created_at BETWEEN ? AND ?
+               ORDER BY id""",
+            (r["city_key"], r["date"],
+             r["analysis_time"] - 120, r["analysis_time"] + 120),
+        ).fetchall()
+        entry["placed_bets"] = [dict(b) for b in bet_rows]
+        mkt_rows = db.conn.execute(
+            """SELECT pb.bracket_label, pb.current_yes_price
+               FROM polymarket_brackets pb
+               JOIN polymarket_events pe ON pb.event_id = pe.event_id
+               WHERE pe.city_key = ? AND pe.date = ?
+               ORDER BY pb.bracket_label""",
+            (r["city_key"], r["date"]),
+        ).fetchall()
+        entry["market_brackets"] = [
+            {"label": m["bracket_label"], "yes_price": m["current_yes_price"] or 0.0}
+            for m in mkt_rows
+        ]
+        result.append(entry)
+    return {"log": result}
+
+
+@app.get("/gemini-betting")
+async def gemini_betting_page(request: Request):
+    return templates.TemplateResponse("gemini_betting.html", {"request": request})
+
+
+@app.get("/api/gemini-bot/status")
+async def api_gemini_bot_status():
+    db = get_db()
+    import datetime
+    today_utc = datetime.date.today().isoformat()
+    runs_today = db.conn.execute(
+        "SELECT COUNT(*) FROM llm_analysis_log WHERE date >= ? AND model LIKE 'gemini%'", (today_utc,)
+    ).fetchone()[0]
+    bets_today = db.conn.execute(
+        "SELECT COUNT(*) FROM bets WHERE date >= ? AND llm_source = 'gemini'", (today_utc,)
+    ).fetchone()[0]
+    return {
+        "enabled": _gemini_bot_state["enabled"],
+        "city_index": _gemini_bot_state["city_index"],
+        "active_city_count": len(_gemini_bot_state["city_keys"]),
+        "active_cities": _gemini_bot_state["city_keys"],
+        "last_run_at": _gemini_bot_state["last_run_at"],
+        "last_city": _gemini_bot_state["last_city"],
+        "last_error": _gemini_bot_state["last_error"],
+        "runs_today": runs_today,
+        "bets_today": bets_today,
+    }
+
+
+@app.post("/api/gemini-bot/toggle")
+async def api_gemini_bot_toggle(enabled: bool):
+    _gemini_bot_state["enabled"] = enabled
+    if enabled:
+        _gemini_bot_state["city_keys"] = []
+        _gemini_bot_state["city_index"] = 0
+    log.info("gemini_bot_toggled", enabled=enabled)
+    return {"enabled": _gemini_bot_state["enabled"]}
+
+
+@app.get("/api/gemini-bot/log")
+async def api_gemini_bot_log(limit: int = 50):
+    import json as _json
+    db = get_db()
+    rows = db.conn.execute(
+        """SELECT id, city_key, date, analysis_time, hour_local, peak_estimate,
+                  peak_confidence, analysis_text, recs_json, bets_executed, model
+           FROM llm_analysis_log WHERE model LIKE 'gemini%'
+           ORDER BY analysis_time DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    result = []
+    for r in rows:
+        entry = dict(r)
+        try:
+            entry["recommendations"] = _json.loads(r["recs_json"] or "[]")
+        except Exception:
+            entry["recommendations"] = []
+        del entry["recs_json"]
+        bet_rows = db.conn.execute(
+            """SELECT bracket_label, side, size, price FROM bets
+               WHERE city_key = ? AND date = ? AND llm_source = 'gemini'
                  AND created_at BETWEEN ? AND ?
                ORDER BY id""",
             (r["city_key"], r["date"],

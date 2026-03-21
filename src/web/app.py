@@ -2445,7 +2445,7 @@ async def startup():
                 peak_row["peak_temp"] if peak_row else None
             )
 
-            wu_forecast = _wu_forecast_cache.get(city_key, [])
+            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
             om_hourly: list[dict] = []
             try:
@@ -2643,7 +2643,7 @@ async def startup():
                 peak_row["peak_temp"] if peak_row else None
             )
 
-            wu_forecast = _wu_forecast_cache.get(city_key, [])
+            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
             om_hourly: list[dict] = []
             try:

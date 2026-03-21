@@ -1077,6 +1077,45 @@ async def api_city_daily_peaks(city_key: str, limit: int = 30):
     return [dict(r) for r in rows]
 
 
+@app.get("/api/city/{city_key}/peak-hours")
+async def api_city_peak_hours(
+    city_key: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 400,
+):
+    """For each date, return only the hour(s) that reached the daily max temperature.
+
+    If two consecutive hours tied for the peak, both are returned so the user
+    can see the plateau.
+    """
+    db = get_db()
+    conditions = ["o.city_key = ?"]
+    params: list = [city_key]
+    if date_from:
+        conditions.append("o.date >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("o.date <= ?")
+        params.append(date_to)
+    where = " AND ".join(conditions)
+    rows = db.conn.execute(
+        f"""SELECT o.*
+            FROM hourly_observations o
+            JOIN (
+                SELECT date, MAX(temperature) AS peak_temp
+                FROM hourly_observations
+                WHERE city_key = ?
+                GROUP BY date
+            ) p ON o.date = p.date AND o.temperature = p.peak_temp
+            WHERE {where}
+            ORDER BY o.date DESC, o.hour ASC
+            LIMIT ?""",
+        [city_key, *params, limit],
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.get("/api/city/{city_key}/stats")
 async def api_city_stats(city_key: str):
     db = get_db()

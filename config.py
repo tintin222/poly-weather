@@ -35,8 +35,9 @@ class Settings(BaseSettings):
     # Bot mode
     bot_auto_start: bool = True  # Runs automated paper trading bot in background
 
-    # LLM advisor
+    # LLM advisors
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
 
     # Logging
     log_level: str = "INFO"

@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS bets (
     pnl               REAL,
     resolved_at       INTEGER,
     is_paper          INTEGER NOT NULL DEFAULT 1,
-    created_at        INTEGER NOT NULL
+    created_at        INTEGER NOT NULL,
+    llm_source        TEXT NOT NULL DEFAULT 'claude'
 );
 
 CREATE INDEX IF NOT EXISTS idx_bets_event ON bets(event_id);

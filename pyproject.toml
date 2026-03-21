@@ -16,6 +16,7 @@ dependencies = [
     "scikit-learn>=1.4",
     "scipy>=1.12",
     "anthropic>=0.40",
+    "openai>=1.0",
     "apscheduler>=3.10",
     "structlog>=24.1",
     "python-dotenv>=1.0",

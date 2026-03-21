@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poly-weather // P&amp;L Comparison</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'], display: ['Space Grotesk', 'sans-serif'] },
+          colors: { term: { bg: '#0a0e14', surface: '#0f1419', border: '#1a2030', muted: '#3d4f6a', text: '#8b9fc0', bright: '#c5d4e8', green: '#00e396', red: '#ff4560', amber: '#feb019', cyan: '#00c8ff', purple: '#775dd0' } }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0a0e14; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #0f1419; border: 1px solid #1a2030; }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0a0e14; } ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.3} } .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } } .spin { animation: spin 1s linear infinite; }
+    .stat-card { background: #0f1419; border: 1px solid #1a2030; border-radius: 0.5rem; padding: 1rem; }
+    .table-row { border-top: 1px solid #1a2030; }
+    .table-row:hover { background: rgba(255,255,255,0.015); }
+    .pnl-pos { color: #00e396; }
+    .pnl-neg { color: #ff4560; }
+    .pnl-zero { color: #3d4f6a; }
+  </style>
+</head>
+<body class="text-term-text text-xs min-h-screen">
+
+  <header class="border-b border-term-border px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <a href="/" class="flex items-center gap-2 hover:opacity-80">
+        <div class="w-2 h-2 rounded-full bg-term-cyan pulse-dot"></div>
+        <h1 class="font-display text-base font-bold text-term-bright tracking-tight">poly-weather</h1>
+      </a>
+      <nav class="flex gap-3 text-[11px]">
+        <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
+        <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
+        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
+        <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
+        <a href="/pnl-comparison" class="text-term-amber">P&amp;L</a>
+        <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
+        <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
+        <a href="/resolution-urls" class="text-term-muted hover:text-term-text">URLs</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-2 text-[10px] text-term-muted">
+      <span id="last-refresh">–</span>
+      <span>· auto-refresh 60s</span>
+    </div>
+  </header>
+
+  <main class="px-4 py-4 max-w-[1400px] mx-auto space-y-4">
+
+    <div class="flex items-center justify-between">
+      <h2 class="font-display font-semibold text-term-bright text-sm">Claude vs GPT — Head-to-Head P&amp;L</h2>
+      <span class="text-[10px] text-term-muted">Paper trading · all time</span>
+    </div>
+
+    <!-- Summary cards -->
+    <div id="summary-loading" class="py-8 text-center text-term-muted text-[11px]">
+      <div class="w-4 h-4 border border-term-muted border-t-transparent rounded-full spin mx-auto mb-2"></div>
+      Loading...
+    </div>
+
+    <div id="summary-grid" class="hidden grid grid-cols-1 md:grid-cols-2 gap-4">
+      <!-- Claude card -->
+      <div class="card rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2.5 h-2.5 rounded-full bg-term-cyan"></div>
+          <h3 class="font-display font-semibold text-term-bright text-sm">Claude Haiku</h3>
+          <span class="text-[10px] text-term-muted">claude-haiku-4-5</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL BETS</div>
+            <div id="c-total-bets" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL COST</div>
+            <div id="c-total-cost" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WINS / LOSSES</div>
+            <div id="c-wl" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WIN RATE</div>
+            <div id="c-win-rate" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">PENDING</div>
+            <div id="c-pending" class="text-base font-mono text-term-muted">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL P&amp;L</div>
+            <div id="c-pnl" class="text-base font-mono">–</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-3 border-t border-term-border flex gap-4 text-[11px]">
+          <span class="text-term-muted">ROI: <span id="c-roi" class="text-term-text">–</span></span>
+        </div>
+      </div>
+
+      <!-- GPT card -->
+      <div class="card rounded-lg p-4">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2.5 h-2.5 rounded-full bg-term-purple"></div>
+          <h3 class="font-display font-semibold text-term-bright text-sm">GPT-5.4-mini</h3>
+          <span class="text-[10px] text-term-muted">gpt-5.4-mini-2026-03-17</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL BETS</div>
+            <div id="g-total-bets" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL COST</div>
+            <div id="g-total-cost" class="text-base font-mono text-term-bright">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WINS / LOSSES</div>
+            <div id="g-wl" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">WIN RATE</div>
+            <div id="g-win-rate" class="text-base font-mono">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">PENDING</div>
+            <div id="g-pending" class="text-base font-mono text-term-muted">–</div>
+          </div>
+          <div class="bg-term-bg rounded p-2 border border-term-border">
+            <div class="text-[9px] text-term-muted mb-0.5">TOTAL P&amp;L</div>
+            <div id="g-pnl" class="text-base font-mono">–</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-3 border-t border-term-border flex gap-4 text-[11px]">
+          <span class="text-term-muted">ROI: <span id="g-roi" class="text-term-text">–</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div id="chart-section" class="hidden card rounded-lg p-4">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-term-bright text-sm">Cumulative P&amp;L Over Time</h3>
+        <div class="flex items-center gap-4 text-[10px]">
+          <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-0.5 bg-term-cyan"></span> Claude</span>
+          <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-0.5 bg-term-purple"></span> GPT</span>
+        </div>
+      </div>
+      <canvas id="pnl-chart" height="120"></canvas>
+    </div>
+
+    <!-- Daily breakdown table -->
+    <div id="table-section" class="hidden card rounded-lg overflow-hidden">
+      <div class="px-4 py-3 border-b border-term-border">
+        <h3 class="font-display font-semibold text-term-bright text-sm">Daily Breakdown</h3>
+      </div>
+      <table class="w-full text-[11px]">
+        <thead>
+          <tr class="text-[10px] text-term-muted uppercase tracking-wide border-b border-term-border">
+            <th class="px-4 py-2 text-left font-normal">Date</th>
+            <th class="px-4 py-2 text-right font-normal">Claude Bets</th>
+            <th class="px-4 py-2 text-right font-normal">Claude Cost</th>
+            <th class="px-4 py-2 text-right font-normal">Claude P&amp;L</th>
+            <th class="px-4 py-2 text-right font-normal">GPT Bets</th>
+            <th class="px-4 py-2 text-right font-normal">GPT Cost</th>
+            <th class="px-4 py-2 text-right font-normal">GPT P&amp;L</th>
+            <th class="px-4 py-2 text-right font-normal">Winner</th>
+          </tr>
+        </thead>
+        <tbody id="daily-body"></tbody>
+      </table>
+    </div>
+
+  </main>
+
+  <script>
+    let pnlChart = null;
+
+    function fmtPnl(val) {
+      if (val == null) return '<span class="text-term-muted">–</span>';
+      const v = parseFloat(val);
+      const sign = v > 0 ? '+' : '';
+      const cls = v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : 'pnl-zero';
+      return `<span class="${cls}">${sign}$${v.toFixed(2)}</span>`;
+    }
+
+    function fmtPnlText(val) {
+      if (val == null || val === 0) return '–';
+      const v = parseFloat(val);
+      const sign = v > 0 ? '+' : '';
+      return `${sign}$${v.toFixed(2)}`;
+    }
+
+    function pnlClass(val) {
+      const v = parseFloat(val || 0);
+      return v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : 'pnl-zero';
+    }
+
+    function winRateColor(rate) {
+      const r = parseFloat(rate || 0);
+      if (r >= 0.6) return 'text-term-green';
+      if (r >= 0.4) return 'text-term-amber';
+      return 'text-term-red';
+    }
+
+    async function loadData() {
+      try {
+        const res = await fetch('/api/pnl-comparison');
+        const data = await res.json();
+
+        document.getElementById('summary-loading').classList.add('hidden');
+        document.getElementById('summary-grid').classList.remove('hidden');
+
+        const summary = data.summary || [];
+        const daily = data.daily || [];
+
+        // Fill summary cards
+        const claudeRow = summary.find(r => r.llm_source === 'claude') || {};
+        const gptRow    = summary.find(r => r.llm_source === 'gpt') || {};
+
+        fillCard('c', claudeRow);
+        fillCard('g', gptRow);
+
+        // Chart
+        if (daily.length > 0) {
+          document.getElementById('chart-section').classList.remove('hidden');
+          buildChart(daily);
+        }
+
+        // Table
+        if (daily.length > 0) {
+          document.getElementById('table-section').classList.remove('hidden');
+          buildTable(daily);
+        }
+
+        document.getElementById('last-refresh').textContent =
+          'Updated ' + new Date().toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      } catch (e) {
+        console.error('P&L load failed', e);
+      }
+    }
+
+    function fillCard(prefix, row) {
+      const totalBets = row.total_bets || 0;
+      const totalCost = parseFloat(row.total_cost || 0);
+      const wins      = row.wins || 0;
+      const losses    = row.losses || 0;
+      const pending   = row.pending || 0;
+      const pnl       = parseFloat(row.total_pnl || 0);
+      const winRate   = parseFloat(row.win_rate || 0);
+      const roi       = totalCost > 0 ? (pnl / totalCost * 100) : 0;
+
+      document.getElementById(`${prefix}-total-bets`).textContent = totalBets;
+      document.getElementById(`${prefix}-total-cost`).textContent = `$${totalCost.toFixed(2)}`;
+
+      const wlEl = document.getElementById(`${prefix}-wl`);
+      wlEl.innerHTML = `<span class="pnl-pos">${wins}</span><span class="text-term-muted"> / </span><span class="pnl-neg">${losses}</span>`;
+
+      const wrEl = document.getElementById(`${prefix}-win-rate`);
+      const wrPct = Math.round(winRate * 100);
+      wrEl.className = `text-base font-mono ${winRateColor(winRate)}`;
+      wrEl.textContent = (wins + losses > 0) ? `${wrPct}%` : '–';
+
+      document.getElementById(`${prefix}-pending`).textContent = pending;
+
+      const pnlEl = document.getElementById(`${prefix}-pnl`);
+      pnlEl.className = `text-base font-mono ${pnlClass(pnl)}`;
+      const sign = pnl > 0 ? '+' : '';
+      pnlEl.textContent = totalBets > 0 ? `${sign}$${pnl.toFixed(2)}` : '–';
+
+      const roiEl = document.getElementById(`${prefix}-roi`);
+      const roiSign = roi > 0 ? '+' : '';
+      roiEl.className = pnlClass(roi);
+      roiEl.textContent = totalCost > 0 ? `${roiSign}${roi.toFixed(1)}%` : '–';
+    }
+
+    function buildChart(daily) {
+      // Group by date, source
+      const dateSet = new Set();
+      const byDateSource = {};
+      for (const row of daily) {
+        dateSet.add(row.date);
+        const key = `${row.date}__${row.llm_source}`;
+        byDateSource[key] = parseFloat(row.pnl || 0);
+      }
+      const dates = [...dateSet].sort();
+
+      // Cumulative per source
+      let cCum = 0, gCum = 0;
+      const cData = [], gData = [];
+      for (const d of dates) {
+        cCum += byDateSource[`${d}__claude`] || 0;
+        gCum += byDateSource[`${d}__gpt`] || 0;
+        cData.push(cCum);
+        gData.push(gCum);
+      }
+
+      const ctx = document.getElementById('pnl-chart').getContext('2d');
+      if (pnlChart) pnlChart.destroy();
+      pnlChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: dates,
+          datasets: [
+            {
+              label: 'Claude',
+              data: cData,
+              borderColor: '#00c8ff',
+              backgroundColor: 'rgba(0,200,255,0.05)',
+              borderWidth: 1.5,
+              pointRadius: 2,
+              tension: 0.3,
+              fill: true,
+            },
+            {
+              label: 'GPT',
+              data: gData,
+              borderColor: '#775dd0',
+              backgroundColor: 'rgba(119,93,208,0.05)',
+              borderWidth: 1.5,
+              pointRadius: 2,
+              tension: 0.3,
+              fill: true,
+            },
+          ]
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#0f1419',
+              borderColor: '#1a2030',
+              borderWidth: 1,
+              titleColor: '#8b9fc0',
+              bodyColor: '#c5d4e8',
+              callbacks: {
+                label: ctx => {
+                  const sign = ctx.raw >= 0 ? '+' : '';
+                  return `  ${ctx.dataset.label}: ${sign}$${ctx.raw.toFixed(2)}`;
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: '#1a2030' },
+              ticks: { color: '#3d4f6a', font: { family: 'JetBrains Mono', size: 9 }, maxRotation: 45 }
+            },
+            y: {
+              grid: { color: '#1a2030' },
+              ticks: {
+                color: '#3d4f6a',
+                font: { family: 'JetBrains Mono', size: 9 },
+                callback: v => `$${v.toFixed(0)}`
+              }
+            }
+          }
+        }
+      });
+    }
+
+    function buildTable(daily) {
+      // Group by date
+      const dateSet = new Set();
+      const byDateSource = {};
+      for (const row of daily) {
+        dateSet.add(row.date);
+        byDateSource[`${row.date}__${row.llm_source}`] = row;
+      }
+      const dates = [...dateSet].sort().reverse();
+
+      const tbody = document.getElementById('daily-body');
+      tbody.innerHTML = '';
+
+      for (const d of dates) {
+        const c = byDateSource[`${d}__claude`] || {};
+        const g = byDateSource[`${d}__gpt`] || {};
+
+        const cPnl = parseFloat(c.pnl || 0);
+        const gPnl = parseFloat(g.pnl || 0);
+        let winner = '–';
+        if ((c.bets || 0) > 0 || (g.bets || 0) > 0) {
+          if (cPnl > gPnl) winner = '<span class="text-term-cyan">Claude</span>';
+          else if (gPnl > cPnl) winner = '<span class="text-term-purple">GPT</span>';
+          else winner = '<span class="text-term-muted">Tie</span>';
+        }
+
+        const tr = document.createElement('tr');
+        tr.className = 'table-row';
+        tr.innerHTML = `
+          <td class="px-4 py-2 text-term-muted">${d}</td>
+          <td class="px-4 py-2 text-right text-term-text">${c.bets || 0}</td>
+          <td class="px-4 py-2 text-right text-term-muted">$${parseFloat(c.cost || 0).toFixed(2)}</td>
+          <td class="px-4 py-2 text-right">${fmtPnl(c.pnl)}</td>
+          <td class="px-4 py-2 text-right text-term-text">${g.bets || 0}</td>
+          <td class="px-4 py-2 text-right text-term-muted">$${parseFloat(g.cost || 0).toFixed(2)}</td>
+          <td class="px-4 py-2 text-right">${fmtPnl(g.pnl)}</td>
+          <td class="px-4 py-2 text-right">${winner}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    // Init
+    loadData();
+    setInterval(loadData, 60000);
+  </script>
+</body>
+</html>

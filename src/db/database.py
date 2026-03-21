@@ -34,6 +34,7 @@ class Database:
         self._migrate_time_local_to_24h()
         self._migrate_clean_resolution_url_dots()
         self._migrate_daily_peaks_add_summary_high()
+        self._migrate_bets_add_llm_source()
         self._conn.commit()
         log.info("database_initialized", path=self._db_path)
 
@@ -87,6 +88,18 @@ class Database:
             self._conn.execute("ALTER TABLE daily_peaks ADD COLUMN summary_high_temp REAL")
             self._conn.commit()
             log.info("migrated_daily_peaks_add_summary_high")
+
+    def _migrate_bets_add_llm_source(self) -> None:
+        """Add llm_source TEXT column to bets if missing (idempotent).
+
+        Existing Claude bets get DEFAULT 'claude' automatically.
+        """
+        assert self._conn is not None
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(bets)").fetchall()}
+        if "llm_source" not in cols:
+            self._conn.execute("ALTER TABLE bets ADD COLUMN llm_source TEXT DEFAULT 'claude'")
+            self._conn.commit()
+            log.info("migrated_bets_add_llm_source")
 
     def _migrate_clean_resolution_url_dots(self) -> None:
         """Strip trailing dots/punctuation from wu_url_path values caused by early regex bug.

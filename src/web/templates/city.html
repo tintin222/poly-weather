@@ -168,26 +168,28 @@
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2" id="om-corr-cards"></div>
       </div>
 
-      <!-- Hourly table -->
-      <div class="border-t border-term-border overflow-auto max-h-[320px]">
-        <table class="w-full text-[11px]">
-          <thead>
-            <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
-              <th class="px-4 py-2">Date</th>
-              <th class="px-2 py-2">Hour</th>
-              <th class="px-2 py-2 text-right">Temp</th>
-              <th class="px-2 py-2 text-right">Feels Like</th>
-              <th class="px-2 py-2 text-right">Humidity</th>
-              <th class="px-2 py-2 text-right">Wind</th>
-              <th class="px-2 py-2 text-right">Precip</th>
-              <th class="px-2 py-2">Condition</th>
-              <th class="px-2 py-2 text-center">Source</th>
-            </tr>
-          </thead>
-          <tbody id="om-tbody">
-            <tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
-          </tbody>
-        </table>
+      <!-- Unified today comparison table -->
+      <div class="border-t border-term-border">
+        <div class="px-4 py-2 text-[10px] text-term-muted uppercase tracking-wider border-b border-term-border/50">Today's Hourly — All Sources</div>
+        <div class="overflow-auto max-h-[380px]">
+          <table class="w-full text-[11px]">
+            <thead>
+              <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
+                <th class="px-4 py-2">Hour</th>
+                <th class="px-2 py-2 text-right" style="color:#feb019">WU Temp</th>
+                <th class="px-2 py-2 text-right" style="color:#00c8ff">OM Temp</th>
+                <th class="px-2 py-2 text-right" style="color:#00e396">METAR Temp</th>
+                <th class="px-2 py-2 text-right">Humidity</th>
+                <th class="px-2 py-2 text-right">Dew Pt</th>
+                <th class="px-2 py-2 text-right">Wind</th>
+                <th class="px-2 py-2">Condition</th>
+              </tr>
+            </thead>
+            <tbody id="om-tbody">
+              <tr><td colspan="8" class="px-4 py-6 text-center text-term-muted">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -195,7 +197,8 @@
     <div class="card rounded-md">
       <div class="px-4 py-2.5 border-b border-term-border">
         <div class="flex items-center justify-between flex-wrap gap-2">
-          <h3 class="font-display font-semibold text-term-bright text-sm">Hourly Observations</h3>
+          <h3 class="font-display font-semibold text-term-bright text-sm">Historical WU Observations</h3>
+          <span class="text-term-muted text-[10px]">Weather Underground only · all dates</span>
           <div class="flex items-center gap-2 flex-wrap">
             <input type="date" id="filter-from" placeholder="From">
             <input type="date" id="filter-to" placeholder="To">
@@ -845,32 +848,51 @@
         { labelA: 'OM', dataA: actualData, colorA: '#00c8ff', labelB: 'WU', dataB: wuData, colorB: '#feb019' },
       ]);
 
-      // Table: today's rows only, forecast rows dimmed
+      // Unified table: one row per hour, columns for each source
       const tbody = document.getElementById('om-tbody');
-      if (!todayRows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-6 text-center text-term-muted">No data.</td></tr>';
-        return;
-      }
-      tbody.innerHTML = todayRows.map(r => {
-        const fc = r.is_forecast;
-        const cls = fc ? 'text-term-muted italic' : 'text-term-text';
-        const tempCls = fc ? 'text-term-purple' : 'text-term-cyan';
-        return `<tr class="${fc ? 'opacity-60' : ''}">
-          <td class="px-4 py-1 ${cls}">${r.date}</td>
-          <td class="px-2 py-1 ${cls}">${String(r.hour).padStart(2,'0')}:00</td>
-          <td class="px-2 py-1 text-right font-medium ${tempCls}">${fmt1(r.temperature)}${U}</td>
-          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.feels_like)}${U}</td>
-          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.humidity)}%</td>
-          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.wind_speed)} ${d.unit === 'fahrenheit' ? 'mph' : 'km/h'}</td>
-          <td class="px-2 py-1 text-right ${cls}">${fmt1(r.precipitation)}mm</td>
-          <td class="px-2 py-1 ${cls} truncate max-w-[120px]">${r.condition}</td>
-          <td class="px-2 py-1 text-center">
-            ${fc
-              ? '<span class="px-1.5 py-0.5 rounded text-[9px] bg-term-purple/10 text-term-purple border border-term-purple/20">forecast</span>'
-              : '<span class="px-1.5 py-0.5 rounded text-[9px] bg-term-cyan/10 text-term-cyan border border-term-cyan/20">actual</span>'}
-          </td>
+      const windUnit = d.unit === 'fahrenheit' ? 'mph' : 'km/h';
+      const unifiedRows = allHours.map((label, i) => {
+        const wu   = wuRows.find(r => r.hour === i);
+        const omAct = actualRows.find(r => r.hour === i);
+        const omFc  = forecastRows.find(r => r.hour === i);
+        const om    = omAct || omFc;
+        const metar = metarRows.find(r => r.hour === i);
+        if (!wu && !om && !metar) return null;
+
+        const wuCell = wu
+          ? `<span class="text-term-amber font-medium">${fmt1(wu.temperature)}${U}</span>`
+          : '<span class="text-term-muted">--</span>';
+        const omColor = (omFc && !omAct) ? 'text-term-purple' : 'text-term-cyan';
+        const omCell = om
+          ? `<span class="${omColor} font-medium">${fmt1(om.temperature)}${U}${(omFc && !omAct) ? '<span class="text-[9px] opacity-50 ml-0.5">fc</span>' : ''}</span>`
+          : '<span class="text-term-muted">--</span>';
+        const metarCell = metar
+          ? `<span class="text-term-green font-medium">${fmt1(metar.temperature)}${U}</span>`
+          : '<span class="text-term-muted">--</span>';
+
+        const humidity = wu?.humidity != null ? fmt1(wu.humidity) + '%'
+                       : om?.humidity  != null ? fmt1(om.humidity)  + '%' : '--';
+        const dewPt = wu?.dew_point != null ? fmt1(wu.dew_point) + U : '--';
+        const wind  = wu
+          ? `${fmt1(wu.wind_speed)} ${windUnit} ${wu.wind_direction || ''}`
+          : om ? `${fmt1(om.wind_speed)} ${windUnit}` : '--';
+        const condition = wu?.condition || om?.condition || metar?.condition || '--';
+
+        return `<tr>
+          <td class="px-4 py-1 text-term-muted">${label}</td>
+          <td class="px-2 py-1 text-right">${wuCell}</td>
+          <td class="px-2 py-1 text-right">${omCell}</td>
+          <td class="px-2 py-1 text-right">${metarCell}</td>
+          <td class="px-2 py-1 text-right text-term-text">${humidity}</td>
+          <td class="px-2 py-1 text-right text-term-text">${dewPt}</td>
+          <td class="px-2 py-1 text-right text-term-text">${wind}</td>
+          <td class="px-2 py-1 text-term-muted truncate max-w-[120px]" title="${condition}">${condition}</td>
         </tr>`;
-      }).join('');
+      }).filter(Boolean);
+
+      tbody.innerHTML = unifiedRows.length
+        ? unifiedRows.join('')
+        : '<tr><td colspan="8" class="px-4 py-6 text-center text-term-muted">No data.</td></tr>';
     }
 
     // ---- Init ----

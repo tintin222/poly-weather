@@ -61,7 +61,7 @@ async def analyze(
     )
 
     raw_text = message.choices[0].message.content or ""
-    log.info("gpt_response_received", city=city_name, chars=len(raw_text))
+    log.info("gpt_response_received", city=city_name, chars=len(raw_text), preview=raw_text[:120])
 
     # Parse JSON — strip markdown fences if present
     json_text = raw_text.strip()
@@ -72,6 +72,11 @@ async def analyze(
     json_text = json_text.strip()
 
     parsed = json.loads(json_text)
+    # Handle double-encoded JSON (model wraps the object in a string)
+    if isinstance(parsed, str):
+        parsed = json.loads(parsed)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Expected JSON object from GPT, got {type(parsed).__name__}: {str(parsed)[:200]}")
 
     bracket_lookup = {b["label"]: b for b in brackets}
     recs: list[BracketRecommendation] = []

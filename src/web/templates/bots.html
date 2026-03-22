@@ -185,6 +185,68 @@
 
     </div>
 
+    <!-- NO Agents -->
+    <div class="flex items-center gap-2 mt-4 mb-2 animate-in" style="animation-delay:0.12s">
+      <span class="text-term-red font-display font-semibold text-xs">NO AGENTS</span>
+      <span class="text-[10px] text-term-muted">safe small-gain BUY_NO bets on excluded brackets</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 animate-in" style="animation-delay:0.14s">
+      <!-- Claude NO -->
+      <div class="card rounded-lg p-4" style="border-color: rgba(255,69,96,0.15);">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div id="claude-no-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+            <span class="font-display font-semibold text-term-bright text-sm">Claude <span class="text-term-red">NO</span></span>
+            <span id="claude-no-lbl" class="text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border">STOPPED</span>
+          </div>
+          <button id="claude-no-btn" onclick="toggleBot('claude-no')"
+            class="btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green">Enable</button>
+        </div>
+        <div class="space-y-0.5 text-[10px]">
+          <div class="text-term-muted">Last run: <span id="claude-no-lastrun" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Last city: <span id="claude-no-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Min bet hour: <span id="claude-no-peak" class="text-term-red">–</span> · window <span id="claude-no-window" class="text-term-red">–</span></div>
+          <div id="claude-no-err" class="hidden text-term-red">Error: <span id="claude-no-errtext"></span></div>
+        </div>
+      </div>
+      <!-- GPT NO -->
+      <div class="card rounded-lg p-4" style="border-color: rgba(255,69,96,0.15);">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div id="gpt-no-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+            <span class="font-display font-semibold text-term-bright text-sm">GPT <span class="text-term-red">NO</span></span>
+            <span id="gpt-no-lbl" class="text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border">STOPPED</span>
+          </div>
+          <button id="gpt-no-btn" onclick="toggleBot('gpt-no')"
+            class="btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green">Enable</button>
+        </div>
+        <div class="space-y-0.5 text-[10px]">
+          <div class="text-term-muted">Last run: <span id="gpt-no-lastrun" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Last city: <span id="gpt-no-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Min bet hour: <span id="gpt-no-peak" class="text-term-red">–</span> · window <span id="gpt-no-window" class="text-term-red">–</span></div>
+          <div id="gpt-no-err" class="hidden text-term-red">Error: <span id="gpt-no-errtext"></span></div>
+        </div>
+      </div>
+      <!-- Gemini NO -->
+      <div class="card rounded-lg p-4" style="border-color: rgba(255,69,96,0.15);">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div id="gemini-no-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+            <span class="font-display font-semibold text-term-bright text-sm">Gemini <span class="text-term-red">NO</span></span>
+            <span id="gemini-no-lbl" class="text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border">STOPPED</span>
+          </div>
+          <button id="gemini-no-btn" onclick="toggleBot('gemini-no')"
+            class="btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green">Enable</button>
+        </div>
+        <div class="space-y-0.5 text-[10px]">
+          <div class="text-term-muted">Last run: <span id="gemini-no-lastrun" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Last city: <span id="gemini-no-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Min bet hour: <span id="gemini-no-peak" class="text-term-red">–</span> · window <span id="gemini-no-window" class="text-term-red">–</span></div>
+          <div id="gemini-no-err" class="hidden text-term-red">Error: <span id="gemini-no-errtext"></span></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Tabbed Analysis Log -->
     <div class="card rounded-lg overflow-hidden">
       <div class="px-4 pt-3 pb-0 border-b border-term-border flex items-center justify-between">
@@ -235,13 +297,16 @@
   </main>
 
   <script>
-    const botState = { claude: false, gpt: false, gemini: false };
+    const botState = { claude: false, gpt: false, gemini: false, 'claude-no': false, 'gpt-no': false, 'gemini-no': false };
     let activeTab = 'claude';
 
     const BOT_CONFIG = {
       claude: { api: 'ai-bot',    color: '#00c8ff', dot: 'bg-term-cyan' },
       gpt:    { api: 'gpt-bot',   color: '#775dd0', dot: 'bg-term-purple' },
       gemini: { api: 'gemini-bot',color: '#00e396', dot: 'bg-term-green' },
+      'claude-no': { api: 'claude-no', color: '#ff4560', dot: 'bg-term-red' },
+      'gpt-no':    { api: 'gpt-no',    color: '#ff4560', dot: 'bg-term-red' },
+      'gemini-no': { api: 'gemini-no',  color: '#ff4560', dot: 'bg-term-red' },
     };
 
     function timeSince(ts) {
@@ -283,12 +348,18 @@
         btn.className = 'btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green';
       }
 
-      document.getElementById(`${bot}-runs`).textContent   = s.runs_today ?? '–';
-      document.getElementById(`${bot}-bets`).textContent   = s.bets_today ?? '–';
-      document.getElementById(`${bot}-cities`).textContent = s.active_city_count ?? '–';
-      const cycle = s.active_city_count > 0
-        ? `${(s.city_index % s.active_city_count) + 1}/${s.active_city_count}` : '–';
-      document.getElementById(`${bot}-cycle`).textContent  = cycle;
+      const runsEl = document.getElementById(`${bot}-runs`);
+      if (runsEl) runsEl.textContent = s.runs_today ?? '–';
+      const betsEl = document.getElementById(`${bot}-bets`);
+      if (betsEl) betsEl.textContent = s.bets_today ?? '–';
+      const citiesEl = document.getElementById(`${bot}-cities`);
+      if (citiesEl) citiesEl.textContent = s.active_city_count ?? '–';
+      const cycleEl = document.getElementById(`${bot}-cycle`);
+      if (cycleEl) {
+        const cycle = s.active_city_count > 0
+          ? `${(s.city_index % s.active_city_count) + 1}/${s.active_city_count}` : '–';
+        cycleEl.textContent = cycle;
+      }
       document.getElementById(`${bot}-lastrun`).textContent  = timeSince(s.last_run_at);
       document.getElementById(`${bot}-lastcity`).textContent = s.last_city || '–';
       document.getElementById(`${bot}-peak`).textContent   = s.last_min_bet_hour != null ? `${s.last_min_bet_hour}:00` : '–';
@@ -304,7 +375,7 @@
     }
 
     async function loadAllStatus() {
-      for (const bot of ['claude', 'gpt', 'gemini']) {
+      for (const bot of ['claude', 'gpt', 'gemini', 'claude-no', 'gpt-no', 'gemini-no']) {
         try {
           const res = await fetch(`/api/${BOT_CONFIG[bot].api}/status`);
           const s = await res.json();

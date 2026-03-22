@@ -80,6 +80,23 @@ _gemini_bot_state: dict = {
     "last_window": None,
 }
 
+# NO agent state dicts
+_claude_no_state: dict = {
+    "enabled": False, "city_keys": [], "city_last_run": {},
+    "last_run_at": 0.0, "last_city": None, "last_error": None,
+    "last_min_bet_hour": None, "last_window": None,
+}
+_gpt_no_state: dict = {
+    "enabled": False, "city_keys": [], "city_last_run": {},
+    "last_run_at": 0.0, "last_city": None, "last_error": None,
+    "last_min_bet_hour": None, "last_window": None,
+}
+_gemini_no_state: dict = {
+    "enabled": False, "city_keys": [], "city_last_run": {},
+    "last_run_at": 0.0, "last_city": None, "last_error": None,
+    "last_min_bet_hour": None, "last_window": None,
+}
+
 
 def _tiered_bet_size(confidence: float, price: float) -> float:
     """Return USDC bet size based on confidence and edge. Returns 0.0 if below threshold.
@@ -96,6 +113,22 @@ def _tiered_bet_size(confidence: float, price: float) -> float:
     if confidence >= 0.80 and edge >= 0.18:
         return 100.0
     if confidence >= 0.75 and edge >= 0.12:
+        return 40.0
+    return 0.0
+
+
+def _no_bet_size(confidence: float, no_price: float) -> float:
+    """Return USDC bet size for BUY_NO bets (safe, small-gain strategy).
+
+      ≥95% conf, NO price 0.85-0.95 → $100
+      ≥90% conf, NO price 0.85-0.95 → $40
+      NO price > 0.95 or < 0.85     → $0
+    """
+    if no_price > 0.95 or no_price < 0.85:
+        return 0.0
+    if confidence >= 0.95:
+        return 100.0
+    if confidence >= 0.90:
         return 40.0
     return 0.0
 
@@ -2536,18 +2569,15 @@ async def startup():
                         continue
                     if rec.price <= 0.01:
                         continue
-                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                    if rec.action != "BUY_YES":
+                        continue  # YES agent: only BUY_YES
+                    if rec.price > 0.92:
                         continue
-                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
-                        continue  # never bet NO against the market's top bracket
-                    if rec.action == "BUY_YES" and rec.price > 0.92:
-                        continue
-                    if rec.action == "BUY_YES" and rec.price < 0.08:
+                    if rec.price < 0.08:
                         continue  # market says <8% chance; too low to bet YES against
-                    if rec.action == "BUY_YES":
-                        if yes_placed_this_run:
-                            continue
-                        if _claude_pos:
+                    if yes_placed_this_run:
+                        continue
+                    if _claude_pos:
                             if _claude_pos["bracket_label"] == rec.bracket_label:
                                 continue  # already holding this bracket
                             # Sell old position, then buy new one
@@ -2788,18 +2818,15 @@ async def startup():
                         continue
                     if rec.price <= 0.01:
                         continue
-                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                    if rec.action != "BUY_YES":
+                        continue  # YES agent: only BUY_YES
+                    if rec.price > 0.92:
                         continue
-                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
-                        continue  # never bet NO against the market's top bracket
-                    if rec.action == "BUY_YES" and rec.price > 0.92:
+                    if rec.price < 0.08:
                         continue
-                    if rec.action == "BUY_YES" and rec.price < 0.08:
-                        continue  # market says <8% chance; too low to bet YES against
-                    if rec.action == "BUY_YES":
-                        if yes_placed_this_run:
-                            continue
-                        if _gpt_pos:
+                    if yes_placed_this_run:
+                        continue
+                    if _gpt_pos:
                             if _gpt_pos["bracket_label"] == rec.bracket_label:
                                 continue
                             old_sell_price = _bracket_prices.get(_gpt_pos["bracket_label"], 0)
@@ -3038,18 +3065,15 @@ async def startup():
                         continue
                     if rec.price <= 0.01:
                         continue
-                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                    if rec.action != "BUY_YES":
+                        continue  # YES agent: only BUY_YES
+                    if rec.price > 0.92:
                         continue
-                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
-                        continue  # never bet NO against the market's top bracket
-                    if rec.action == "BUY_YES" and rec.price > 0.92:
+                    if rec.price < 0.08:
                         continue
-                    if rec.action == "BUY_YES" and rec.price < 0.08:
-                        continue  # market says <8% chance; too low to bet YES against
-                    if rec.action == "BUY_YES":
-                        if yes_placed_this_run:
-                            continue
-                        if _gemini_pos:
+                    if yes_placed_this_run:
+                        continue
+                    if _gemini_pos:
                             if _gemini_pos["bracket_label"] == rec.bracket_label:
                                 continue
                             old_sell_price = _bracket_prices.get(_gemini_pos["bracket_label"], 0)
@@ -3153,6 +3177,404 @@ async def startup():
         seconds=45,
         id="gemini_auto_bet",
     )
+
+    # ---- NO Agent Bot Loops ----
+    async def _run_claude_no_bot():
+        """Claude NO agent: BUY_NO on clearly excluded brackets for safe small gains."""
+        from config import settings
+        from src.weather.cities import get_city, CITIES
+        from src.utils.time_utils import today_in_tz, current_hour_in_tz
+        from src.weather import open_meteo, metar as metar_mod
+        from src.strategy.llm_advisor import analyze as llm_analyze
+        from src.polymarket.trader import PolymarketTrader
+        import json as _json
+
+        if not _claude_no_state["enabled"]:
+            return
+        if not settings.anthropic_api_key:
+            return
+
+        db = get_db()
+        now = time.time()
+        _COOLDOWN = 300
+
+        active_keys: list[str] = []
+        for ck, city_obj in CITIES.items():
+            _today = today_in_tz(city_obj.timezone)
+            row = db.conn.execute(
+                "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                (ck, _today),
+            ).fetchone()
+            if row:
+                active_keys.append(ck)
+        _claude_no_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+
+        for city_key in active_keys:
+            if now - _claude_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            _claude_no_state["city_last_run"][city_key] = now
+            _claude_no_state["last_city"] = city_key
+
+            city = get_city(city_key)
+            if not city:
+                continue
+
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+            if current_hour < 7:
+                continue
+
+            try:
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date),
+                ).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date),
+                ).fetchone()
+                summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                    peak_row["peak_temp"] if peak_row else None
+                )
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = [
+                        {"hour": h["hour"], "temperature": h["temperature"], "is_forecast": h.get("is_forecast", False)}
+                        for h in om_data.get("hourly", []) if h.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
+
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [
+                        {"hour": o["hour"], "temperature": o["temperature"]}
+                        for o in metar_data.get("observations", []) if o.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
+
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _claude_no_state["last_min_bet_hour"] = min_hour
+                _claude_no_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
+                    continue
+
+                advice = await llm_analyze(
+                    api_key=settings.anthropic_api_key,
+                    city_name=city.display_name, unit=city.unit, today=event_date,
+                    current_local_hour=current_hour, wu_obs=wu_obs, wu_forecast=wu_forecast,
+                    om_hourly=om_hourly, metar_obs=metar_obs_list, summary_high=summary_high,
+                    brackets=brackets, historical_context=historical_context, min_bet_hour=min_hour,
+                )
+
+                executed_count = 0
+                trader = PolymarketTrader(settings)
+                _no_cfg = _load_bot_settings(db.conn, "claude-no")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action != "BUY_NO":
+                        continue  # NO agent: only BUY_NO
+                    if not rec.token_id or rec.price <= 0.01:
+                        continue
+                    if rec.bracket_label == _market_leader:
+                        continue  # never bet NO on market leader
+                    if rec.confidence < _no_cfg["min_confidence"]:
+                        continue
+                    bet_size = _no_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _no_cfg["max_bet_usd"])
+                    existing = db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'claude-no' LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, rec.action),
+                    ).fetchone()
+                    if existing:
+                        continue
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute(
+                        "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'claude-no' AND date = ?",
+                        (event_date,),
+                    ).fetchone()[0]
+                    if today_spent + cost > _no_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (rec.event_id, rec.bracket_db_id, city_key, event_date,
+                         rec.bracket_label, rec.action, rec.token_id,
+                         rec.price, size, cost, order.order_id, order.status,
+                         advice.peak_temp_estimate or 0.0,
+                         peak_row["peak_hour"] if peak_row else 0,
+                         rec.confidence, rec.confidence - rec.price,
+                         int(order.is_paper), int(time.time()), "claude-no"),
+                    )
+                    db.conn.commit()
+                    executed_count += 1
+                    log.info("CLAUDE_NO_BET", city=city_key, bracket=rec.bracket_label,
+                             price=rec.price, conf=f"{rec.confidence:.0%}")
+
+                _claude_no_state["last_run_at"] = time.time()
+                _claude_no_state["last_error"] = None
+
+            except Exception as exc:
+                _claude_no_state["last_error"] = str(exc)
+                log.error("claude_no_tick_failed", city=city_key, error=str(exc))
+
+    async def _run_gpt_no_bot():
+        """GPT NO agent: BUY_NO on clearly excluded brackets."""
+        from config import settings
+        from src.weather.cities import get_city, CITIES
+        from src.utils.time_utils import today_in_tz, current_hour_in_tz
+        from src.weather import open_meteo, metar as metar_mod
+        from src.strategy.openai_advisor import analyze as gpt_analyze
+        from src.polymarket.trader import PolymarketTrader
+
+        if not _gpt_no_state["enabled"] or not settings.openai_api_key:
+            return
+        db = get_db()
+        now = time.time()
+        _COOLDOWN = 300
+        active_keys = [ck for ck, c in CITIES.items()
+                       if db.conn.execute("SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                                          (ck, today_in_tz(c.timezone))).fetchone()]
+        _gpt_no_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+        for city_key in active_keys:
+            if now - _gpt_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            _gpt_no_state["city_last_run"][city_key] = now
+            _gpt_no_state["last_city"] = city_key
+            city = get_city(city_key)
+            if not city:
+                continue
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+            if current_hour < 7:
+                continue
+            try:
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date)).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date)).fetchone()
+                summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                    peak_row["peak_temp"] if peak_row else None)
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = om_data.get("hourly", [])
+                except Exception:
+                    pass
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [{"hour": o["hour"], "temperature": o["temperature"]}
+                                     for o in metar_data.get("observations", []) if o.get("date") == event_date]
+                except Exception:
+                    pass
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _gpt_no_state["last_min_bet_hour"] = min_hour
+                _gpt_no_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
+                    continue
+                advice = await gpt_analyze(
+                    api_key=settings.openai_api_key, city_name=city.display_name, unit=city.unit,
+                    today=event_date, current_local_hour=current_hour, wu_obs=wu_obs, wu_forecast=wu_forecast,
+                    om_hourly=om_hourly, metar_obs=metar_obs_list, summary_high=summary_high,
+                    brackets=brackets, historical_context=historical_context, min_bet_hour=min_hour)
+                executed_count = 0
+                trader = PolymarketTrader(settings)
+                _no_cfg = _load_bot_settings(db.conn, "gpt-no")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action != "BUY_NO" or not rec.token_id or rec.price <= 0.01:
+                        continue
+                    if rec.bracket_label == _market_leader:
+                        continue
+                    if rec.confidence < _no_cfg["min_confidence"]:
+                        continue
+                    bet_size = _no_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _no_cfg["max_bet_usd"])
+                    if db.conn.execute("SELECT 1 FROM bets WHERE city_key=? AND date=? AND bracket_label=? AND side=? AND llm_source='gpt-no' LIMIT 1",
+                                       (city_key, event_date, rec.bracket_label, rec.action)).fetchone():
+                        continue
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute("SELECT COALESCE(SUM(cost),0) FROM bets WHERE llm_source='gpt-no' AND date=?", (event_date,)).fetchone()[0]
+                    if today_spent + cost > _no_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (rec.event_id, rec.bracket_db_id, city_key, event_date, rec.bracket_label,
+                         rec.action, rec.token_id, rec.price, size, cost, order.order_id, order.status,
+                         advice.peak_temp_estimate or 0.0, peak_row["peak_hour"] if peak_row else 0,
+                         rec.confidence, rec.confidence - rec.price, int(order.is_paper), int(time.time()), "gpt-no"))
+                    db.conn.commit()
+                    executed_count += 1
+                    log.info("GPT_NO_BET", city=city_key, bracket=rec.bracket_label, price=rec.price, conf=f"{rec.confidence:.0%}")
+                _gpt_no_state["last_run_at"] = time.time()
+                _gpt_no_state["last_error"] = None
+            except Exception as exc:
+                _gpt_no_state["last_error"] = str(exc)
+                log.error("gpt_no_tick_failed", city=city_key, error=str(exc))
+
+    async def _run_gemini_no_bot():
+        """Gemini NO agent: BUY_NO on clearly excluded brackets."""
+        from config import settings
+        from src.weather.cities import get_city, CITIES
+        from src.utils.time_utils import today_in_tz, current_hour_in_tz
+        from src.weather import open_meteo, metar as metar_mod
+        from src.strategy.gemini_advisor import analyze as gemini_analyze
+        from src.polymarket.trader import PolymarketTrader
+
+        if not _gemini_no_state["enabled"] or not settings.gemini_api_key:
+            return
+        db = get_db()
+        now = time.time()
+        _COOLDOWN = 300
+        active_keys = [ck for ck, c in CITIES.items()
+                       if db.conn.execute("SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                                          (ck, today_in_tz(c.timezone))).fetchone()]
+        _gemini_no_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+        for city_key in active_keys:
+            if now - _gemini_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            _gemini_no_state["city_last_run"][city_key] = now
+            _gemini_no_state["last_city"] = city_key
+            city = get_city(city_key)
+            if not city:
+                continue
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+            if current_hour < 7:
+                continue
+            try:
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date)).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date)).fetchone()
+                summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                    peak_row["peak_temp"] if peak_row else None)
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = om_data.get("hourly", [])
+                except Exception:
+                    pass
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [{"hour": o["hour"], "temperature": o["temperature"]}
+                                     for o in metar_data.get("observations", []) if o.get("date") == event_date]
+                except Exception:
+                    pass
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _gemini_no_state["last_min_bet_hour"] = min_hour
+                _gemini_no_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
+                    continue
+                advice = await gemini_analyze(
+                    api_key=settings.gemini_api_key, city_name=city.display_name, unit=city.unit,
+                    today=event_date, current_local_hour=current_hour, wu_obs=wu_obs, wu_forecast=wu_forecast,
+                    om_hourly=om_hourly, metar_obs=metar_obs_list, summary_high=summary_high,
+                    brackets=brackets, historical_context=historical_context, min_bet_hour=min_hour)
+                executed_count = 0
+                trader = PolymarketTrader(settings)
+                _no_cfg = _load_bot_settings(db.conn, "gemini-no")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action != "BUY_NO" or not rec.token_id or rec.price <= 0.01:
+                        continue
+                    if rec.bracket_label == _market_leader:
+                        continue
+                    if rec.confidence < _no_cfg["min_confidence"]:
+                        continue
+                    bet_size = _no_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _no_cfg["max_bet_usd"])
+                    if db.conn.execute("SELECT 1 FROM bets WHERE city_key=? AND date=? AND bracket_label=? AND side=? AND llm_source='gemini-no' LIMIT 1",
+                                       (city_key, event_date, rec.bracket_label, rec.action)).fetchone():
+                        continue
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute("SELECT COALESCE(SUM(cost),0) FROM bets WHERE llm_source='gemini-no' AND date=?", (event_date,)).fetchone()[0]
+                    if today_spent + cost > _no_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (rec.event_id, rec.bracket_db_id, city_key, event_date, rec.bracket_label,
+                         rec.action, rec.token_id, rec.price, size, cost, order.order_id, order.status,
+                         advice.peak_temp_estimate or 0.0, peak_row["peak_hour"] if peak_row else 0,
+                         rec.confidence, rec.confidence - rec.price, int(order.is_paper), int(time.time()), "gemini-no"))
+                    db.conn.commit()
+                    executed_count += 1
+                    log.info("GEMINI_NO_BET", city=city_key, bracket=rec.bracket_label, price=rec.price, conf=f"{rec.confidence:.0%}")
+                _gemini_no_state["last_run_at"] = time.time()
+                _gemini_no_state["last_error"] = None
+            except Exception as exc:
+                _gemini_no_state["last_error"] = str(exc)
+                log.error("gemini_no_tick_failed", city=city_key, error=str(exc))
+
+    _scheduler.add_job(_run_claude_no_bot, "interval", minutes=1, seconds=10, id="claude_no_bot")
+    _scheduler.add_job(_run_gpt_no_bot, "interval", minutes=1, seconds=25, id="gpt_no_bot")
+    _scheduler.add_job(_run_gemini_no_bot, "interval", minutes=1, seconds=50, id="gemini_no_bot")
 
     _scheduler.start()
     log.info("scheduler_started")
@@ -3481,6 +3903,62 @@ async def api_gemini_bot_log(limit: int = 50):
         ]
         result.append(entry)
     return {"log": result}
+
+
+# ---- NO Bot Status/Toggle Endpoints ----
+@app.get("/api/claude-no/status")
+async def api_claude_no_status():
+    return {
+        "enabled": _claude_no_state["enabled"],
+        "last_run_at": _claude_no_state["last_run_at"],
+        "last_city": _claude_no_state["last_city"],
+        "last_error": _claude_no_state["last_error"],
+        "last_min_bet_hour": _claude_no_state["last_min_bet_hour"],
+        "last_window": _claude_no_state["last_window"],
+    }
+
+@app.post("/api/claude-no/toggle")
+async def api_claude_no_toggle(enabled: bool):
+    _claude_no_state["enabled"] = enabled
+    if enabled:
+        _claude_no_state["city_last_run"] = {}
+    return {"enabled": _claude_no_state["enabled"]}
+
+@app.get("/api/gpt-no/status")
+async def api_gpt_no_status():
+    return {
+        "enabled": _gpt_no_state["enabled"],
+        "last_run_at": _gpt_no_state["last_run_at"],
+        "last_city": _gpt_no_state["last_city"],
+        "last_error": _gpt_no_state["last_error"],
+        "last_min_bet_hour": _gpt_no_state["last_min_bet_hour"],
+        "last_window": _gpt_no_state["last_window"],
+    }
+
+@app.post("/api/gpt-no/toggle")
+async def api_gpt_no_toggle(enabled: bool):
+    _gpt_no_state["enabled"] = enabled
+    if enabled:
+        _gpt_no_state["city_last_run"] = {}
+    return {"enabled": _gpt_no_state["enabled"]}
+
+@app.get("/api/gemini-no/status")
+async def api_gemini_no_status():
+    return {
+        "enabled": _gemini_no_state["enabled"],
+        "last_run_at": _gemini_no_state["last_run_at"],
+        "last_city": _gemini_no_state["last_city"],
+        "last_error": _gemini_no_state["last_error"],
+        "last_min_bet_hour": _gemini_no_state["last_min_bet_hour"],
+        "last_window": _gemini_no_state["last_window"],
+    }
+
+@app.post("/api/gemini-no/toggle")
+async def api_gemini_no_toggle(enabled: bool):
+    _gemini_no_state["enabled"] = enabled
+    if enabled:
+        _gemini_no_state["city_last_run"] = {}
+    return {"enabled": _gemini_no_state["enabled"]}
 
 
 @app.get("/pnl-comparison")

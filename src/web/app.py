@@ -120,11 +120,11 @@ def _tiered_bet_size(confidence: float, price: float) -> float:
 def _no_bet_size(confidence: float, no_price: float) -> float:
     """Return USDC bet size for BUY_NO bets (safe, small-gain strategy).
 
-      ≥95% conf, NO price 0.85-0.95 → $100
-      ≥90% conf, NO price 0.85-0.95 → $40
-      NO price > 0.95 or < 0.85     → $0
+      ≥95% conf, NO price 0.80-0.97 → $100 (3-20% return)
+      ≥90% conf, NO price 0.80-0.97 → $40
+      NO price > 0.97 or < 0.80     → $0
     """
-    if no_price > 0.95 or no_price < 0.85:
+    if no_price > 0.97 or no_price < 0.80:
         return 0.0
     if confidence >= 0.95:
         return 100.0

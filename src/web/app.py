@@ -506,6 +506,85 @@ async def api_peaks(city_key: str, limit: int = 30):
 
 
 # ---------------------------------------------------------------------------
+# Bets history page
+# ---------------------------------------------------------------------------
+
+@app.get("/bets", response_class=HTMLResponse)
+async def bets_page(
+    request: Request,
+    date: str = "",
+    city: str = "",
+    sort: str = "created_at",
+    order: str = "desc",
+    page: int = 1,
+):
+    from src.weather.cities import CITIES
+    db = get_db()
+    conn = db.conn
+
+    per_page = 50
+    offset = (page - 1) * per_page
+
+    conditions: list[str] = []
+    params: list = []
+    if date:
+        conditions.append("b.date = ?")
+        params.append(date)
+    if city:
+        conditions.append("b.city_key = ?")
+        params.append(city)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    allowed_sort = {"created_at": "b.created_at", "date": "b.date", "city": "b.city_key"}
+    sort_col = allowed_sort.get(sort, "b.created_at")
+    sort_dir = "ASC" if order == "asc" else "DESC"
+
+    total = conn.execute(
+        f"SELECT COUNT(*) as cnt FROM bets b {where}", params
+    ).fetchone()["cnt"]
+
+    bets = conn.execute(f"""
+        SELECT b.*,
+               (b.size - b.cost) as profit_if_win,
+               datetime(b.created_at, 'unixepoch') as placed_at
+        FROM bets b
+        {where}
+        ORDER BY {sort_col} {sort_dir}
+        LIMIT ? OFFSET ?
+    """, params + [per_page, offset]).fetchall()
+
+    summary = conn.execute(f"""
+        SELECT COUNT(*) as total_bets,
+               SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN won=0 THEN 1 ELSE 0 END) as losses,
+               SUM(CASE WHEN won IS NULL THEN 1 ELSE 0 END) as pending,
+               COALESCE(SUM(cost), 0) as total_staked,
+               COALESCE(SUM(CASE WHEN won=1 THEN (size-cost) ELSE 0 END), 0) as won_profit,
+               COALESCE(SUM(CASE WHEN won=0 THEN -cost ELSE 0 END), 0) as lost_cost,
+               COALESCE(SUM(pnl), 0) as net_pnl
+        FROM bets b {where}
+    """, params).fetchone()
+
+    city_keys = sorted(CITIES.keys())
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    return templates.TemplateResponse("bets.html", {
+        "request": request,
+        "bets": bets,
+        "summary": summary,
+        "city_keys": city_keys,
+        "filter_date": date,
+        "filter_city": city,
+        "sort": sort,
+        "order": order,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+        "per_page": per_page,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Opportunities page
 # ---------------------------------------------------------------------------
 

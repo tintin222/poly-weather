@@ -1282,11 +1282,12 @@ async def api_update_paper_config(
 
 @app.post("/api/paper-account/reset")
 async def api_reset_paper_account():
-    """Reset paper trading: delete all bets, keep config."""
+    """Reset paper trading: delete all bets and analysis logs, keep config."""
     db = get_db()
     db.conn.execute("DELETE FROM bets")
+    db.conn.execute("DELETE FROM llm_analysis_log")
     db.conn.commit()
-    return {"status": "ok", "message": "All bets deleted. Balance reset."}
+    return {"status": "ok", "message": "All bets and analysis logs deleted. Balance reset."}
 
 
 _BOT_SETTINGS_DEFAULTS = {

@@ -2532,6 +2532,11 @@ async def startup():
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
+                        if db.conn.execute(
+                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'claude' LIMIT 1",
+                            (city_key, event_date),
+                        ).fetchone():
+                            continue
                     if rec.confidence < _claude_cfg["min_confidence"]:
                         continue
                     bet_size = _tiered_bet_size(rec.confidence, rec.price)
@@ -2757,6 +2762,11 @@ async def startup():
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
+                        if db.conn.execute(
+                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gpt' LIMIT 1",
+                            (city_key, event_date),
+                        ).fetchone():
+                            continue
                     if rec.confidence < _gpt_cfg["min_confidence"]:
                         continue
                     bet_size = _tiered_bet_size(rec.confidence, rec.price)
@@ -2980,6 +2990,11 @@ async def startup():
                         continue  # market says <8% chance; too low to bet YES against
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
+                            continue
+                        if db.conn.execute(
+                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gemini' LIMIT 1",
+                            (city_key, event_date),
+                        ).fetchone():
                             continue
                     if rec.confidence < _gemini_cfg["min_confidence"]:
                         continue

@@ -43,10 +43,12 @@ def main():
     setup_logging(settings.log_level)
 
     # Optionally start the automated bot loop in a daemon thread
-    if settings.bot_auto_start:
+    if settings.bot_auto_start and settings.orchestrator_enabled:
         bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
         bot_thread.start()
         log.info("bot_thread_started")
+    elif settings.bot_auto_start:
+        log.info("orchestrator_disabled", msg="Orchestrator is off (orchestrator_enabled=False). LLM bots handle betting via the web scheduler.")
     else:
         log.info("bot_auto_start_disabled", msg="Dashboard-only mode. Use /opportunities for manual trading.")
 

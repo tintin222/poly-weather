@@ -246,12 +246,13 @@ class Orchestrator:
             log.debug("peak_hour_gate_skip", city=city.key, peak_hour=peak_hour)
             return
 
-        # Use summary_high only when it's within 2°C of hourly observations.
+        # Use summary_high only when it's within 1.5°C of hourly observations.
         # A larger gap means WU's summary is a stale forecast, not an observed value —
         # trusting it would select a bracket the temperature never actually reached.
+        # (e.g. Ankara: hourly max 11°C, WU summary 13°C → gap=2°C → use 11°C)
         daily_peak_row = self._weather_repo.get_daily_peak(city.key, today)
         summary_high = daily_peak_row["summary_high_temp"] if daily_peak_row else None
-        if summary_high is not None and summary_high - max_temp > 2:
+        if summary_high is not None and summary_high - max_temp > 1.5:
             log.info(
                 "summary_high_ignored",
                 city=city.key,

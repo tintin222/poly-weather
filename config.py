@@ -34,6 +34,12 @@ class Settings(BaseSettings):
 
     # Bot mode
     bot_auto_start: bool = True  # Runs automated paper trading bot in background
+    # Orchestrator: CDF+ML mechanical betting bot. Disabled by default — the LLM bots
+    # (Claude/GPT/Gemini) use richer reasoning and multi-source data and consistently
+    # outperform the mechanical model. Enabling this alongside LLMs risks conflicting
+    # bracket positions (different bets on the same city/date). Set to True only for
+    # A/B testing or if all LLM bots are disabled.
+    orchestrator_enabled: bool = False
 
     # LLM advisors
     anthropic_api_key: str = ""

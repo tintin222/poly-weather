@@ -32,8 +32,8 @@ async def analyze(
     metar_obs: list[dict],
     summary_high: float | None,
     brackets: list[dict],
-    peak_history: list[dict],
-    avg_peak_hour: float,
+    historical_context: list[dict],
+    min_bet_hour: int,
 ) -> LLMAdvice:
     """Call GPT to analyze all weather data and return bracket recommendations."""
     import openai
@@ -49,8 +49,8 @@ async def analyze(
         metar_obs=metar_obs,
         summary_high=summary_high,
         brackets=brackets,
-        peak_history=peak_history,
-        avg_peak_hour=avg_peak_hour,
+        historical_context=historical_context,
+        min_bet_hour=min_bet_hour,
     )
 
     client = openai.AsyncOpenAI(api_key=api_key)

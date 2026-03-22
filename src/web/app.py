@@ -54,7 +54,7 @@ _ai_bot_state: dict = {
     "bets_today": 0,
     "last_city": None,
     "last_error": None,
-    "last_predicted_peak": None,   # ML-predicted peak hour for last city processed
+    "last_min_bet_hour": None,
     "last_window": None,           # betting window string e.g. "07:00–12:00"
 }
 
@@ -65,7 +65,7 @@ _gpt_bot_state: dict = {
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
-    "last_predicted_peak": None,
+    "last_min_bet_hour": None,
     "last_window": None,
 }
 
@@ -76,7 +76,7 @@ _gemini_bot_state: dict = {
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
-    "last_predicted_peak": None,
+    "last_min_bet_hour": None,
     "last_window": None,
 }
 
@@ -100,39 +100,45 @@ def _tiered_bet_size(confidence: float, price: float) -> float:
     return 0.0
 
 
-def _ml_predicted_peak_hour(
-    ml_trainer,
-    city_key: str,
-    today_obs: list[dict],
-    rolling_peak_hour: float,
-    day_of_year: int,
-    peak_hour_yesterday: float,
-    peak_hour_2d_ago: float,
-    peak_hour_trend_3d: float,
-) -> int | None:
-    """Scan hours 6-20, return the hour with highest ML P(peak) for today.
-
-    Calls predict_is_peak() for each candidate hour using today's actual
-    observations as the feature baseline. Returns None only when no model
-    has been trained for this city yet.
+def _min_bet_hour(db, city_key: str, n_days: int = 10) -> int:
+    """Earliest hour betting is allowed = min(peak_hour) over last n_days.
+    Falls back to 12 if fewer than 3 days of history.
     """
-    best_hour = None
-    best_prob = -1.0
-    for h in range(6, 21):
-        prob = ml_trainer.predict_is_peak(
-            city_key=city_key,
-            current_hour=h,
-            today_obs=today_obs,
-            rolling_peak_hour=rolling_peak_hour,
-            day_of_year=day_of_year,
-            peak_hour_yesterday=peak_hour_yesterday,
-            peak_hour_2d_ago=peak_hour_2d_ago,
-            peak_hour_trend_3d=peak_hour_trend_3d,
-        )
-        if prob is not None and prob > best_prob:
-            best_prob = prob
-            best_hour = h
-    return best_hour
+    rows = db.conn.execute(
+        "SELECT peak_hour FROM daily_peaks "
+        "WHERE city_key = ? AND peak_hour > 0 "
+        "ORDER BY date DESC LIMIT ?",
+        (city_key, n_days),
+    ).fetchall()
+    if len(rows) < 3:
+        return 12
+    return min(r["peak_hour"] for r in rows)
+
+
+def _fetch_historical_context(db, city_key: str, n_days: int = 10) -> list[dict]:
+    """Fetch n_days of historical hourly curves + peak info for LLM context."""
+    peaks = db.conn.execute(
+        "SELECT date, peak_temp, peak_hour, summary_high_temp "
+        "FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+        "ORDER BY date DESC LIMIT ?",
+        (city_key, n_days),
+    ).fetchall()
+    result = []
+    for p in peaks:
+        hourly = db.conn.execute(
+            "SELECT hour, temperature FROM hourly_observations "
+            "WHERE city_key = ? AND date = ? AND hour BETWEEN 8 AND 20 "
+            "ORDER BY hour",
+            (city_key, p["date"]),
+        ).fetchall()
+        result.append({
+            "date": p["date"],
+            "peak_temp": p["peak_temp"],
+            "peak_hour": p["peak_hour"],
+            "summary_high_temp": p["summary_high_temp"],
+            "hourly": [{"hour": h["hour"], "temperature": h["temperature"]} for h in hourly],
+        })
+    return result
 
 
 def _get_best_active_event_brackets(db, city_key: str, today: str) -> tuple[list[dict], str]:
@@ -1699,18 +1705,9 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
     except Exception as exc:
         log.warning("llm_analyze_metar_error", city=city_key, error=str(exc))
 
-    # --- Historical peak hours ---
-    hist_peaks = db.conn.execute(
-        "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-        "ORDER BY date DESC LIMIT 14",
-        (city_key,),
-    ).fetchall()
-    peak_history = [dict(r) for r in hist_peaks]
-    avg_peak_row = db.conn.execute(
-        "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-        (city_key,),
-    ).fetchone()
-    avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
+    # --- Historical context (10-day hourly curves + peaks) ---
+    historical_context = _fetch_historical_context(db, city_key)
+    min_hour = _min_bet_hour(db, city_key)
 
     # --- Call LLM ---
     try:
@@ -1726,8 +1723,8 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
             metar_obs=metar_obs_list,
             summary_high=summary_high,
             brackets=brackets,
-            peak_history=peak_history,
-            avg_peak_hour=avg_peak_hour,
+            historical_context=historical_context,
+            min_bet_hour=min_hour,
         )
     except Exception as exc:
         log.error("llm_analyze_failed", city=city_key, error=str(exc))
@@ -2492,41 +2489,12 @@ async def startup():
                 except Exception:
                     pass
 
-                # Historical peak hours
-                hist_peaks = db.conn.execute(
-                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                    "ORDER BY date DESC LIMIT 14",
-                    (city_key,),
-                ).fetchall()
-                peak_history = [dict(r) for r in hist_peaks]
-                avg_peak_row = db.conn.execute(
-                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                    (city_key,),
-                ).fetchone()
-                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-                import datetime as _dt_module
-                _event_dt = _dt_module.date.fromisoformat(event_date)
-                _doy = _event_dt.timetuple().tm_yday
-                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                                if len(peak_history) >= 3 else 0.0
-                predicted_peak = _ml_predicted_peak_hour(
-                    ml_trainer=get_ml_trainer(),
-                    city_key=city_key,
-                    today_obs=wu_obs,
-                    rolling_peak_hour=avg_peak_hour,
-                    day_of_year=_doy,
-                    peak_hour_yesterday=_ph_yesterday,
-                    peak_hour_2d_ago=_ph_2d_ago,
-                    peak_hour_trend_3d=_ph_trend,
-                )
-                if predicted_peak is None:
-                    predicted_peak = int(avg_peak_hour)
-                _ai_bot_state["last_predicted_peak"] = predicted_peak
-                _ai_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                # Historical context (10-day hourly curves + peaks)
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _ai_bot_state["last_min_bet_hour"] = min_hour
+                _ai_bot_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
                     continue
 
                 advice = await llm_analyze(
@@ -2541,8 +2509,8 @@ async def startup():
                     metar_obs=metar_obs_list,
                     summary_high=summary_high,
                     brackets=brackets,
-                    peak_history=peak_history,
-                    avg_peak_hour=avg_peak_hour,
+                    historical_context=historical_context,
+                    min_bet_hour=min_hour,
                 )
 
                 executed_count = 0
@@ -2747,40 +2715,11 @@ async def startup():
                 except Exception:
                     pass
 
-                hist_peaks = db.conn.execute(
-                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                    "ORDER BY date DESC LIMIT 14",
-                    (city_key,),
-                ).fetchall()
-                peak_history = [dict(r) for r in hist_peaks]
-                avg_peak_row = db.conn.execute(
-                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                    (city_key,),
-                ).fetchone()
-                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-                import datetime as _dt_module
-                _event_dt = _dt_module.date.fromisoformat(event_date)
-                _doy = _event_dt.timetuple().tm_yday
-                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                                if len(peak_history) >= 3 else 0.0
-                predicted_peak = _ml_predicted_peak_hour(
-                    ml_trainer=get_ml_trainer(),
-                    city_key=city_key,
-                    today_obs=wu_obs,
-                    rolling_peak_hour=avg_peak_hour,
-                    day_of_year=_doy,
-                    peak_hour_yesterday=_ph_yesterday,
-                    peak_hour_2d_ago=_ph_2d_ago,
-                    peak_hour_trend_3d=_ph_trend,
-                )
-                if predicted_peak is None:
-                    predicted_peak = int(avg_peak_hour)
-                _gpt_bot_state["last_predicted_peak"] = predicted_peak
-                _gpt_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _gpt_bot_state["last_min_bet_hour"] = min_hour
+                _gpt_bot_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
                     continue
 
                 advice = await gpt_analyze(
@@ -2795,8 +2734,8 @@ async def startup():
                     metar_obs=metar_obs_list,
                     summary_high=summary_high,
                     brackets=brackets,
-                    peak_history=peak_history,
-                    avg_peak_hour=avg_peak_hour,
+                    historical_context=historical_context,
+                    min_bet_hour=min_hour,
                 )
 
                 executed_count = 0
@@ -3000,40 +2939,11 @@ async def startup():
                 except Exception:
                     pass
 
-                hist_peaks = db.conn.execute(
-                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                    "ORDER BY date DESC LIMIT 14",
-                    (city_key,),
-                ).fetchall()
-                peak_history = [dict(r) for r in hist_peaks]
-                avg_peak_row = db.conn.execute(
-                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                    (city_key,),
-                ).fetchone()
-                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-                import datetime as _dt_module
-                _event_dt = _dt_module.date.fromisoformat(event_date)
-                _doy = _event_dt.timetuple().tm_yday
-                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                                if len(peak_history) >= 3 else 0.0
-                predicted_peak = _ml_predicted_peak_hour(
-                    ml_trainer=get_ml_trainer(),
-                    city_key=city_key,
-                    today_obs=wu_obs,
-                    rolling_peak_hour=avg_peak_hour,
-                    day_of_year=_doy,
-                    peak_hour_yesterday=_ph_yesterday,
-                    peak_hour_2d_ago=_ph_2d_ago,
-                    peak_hour_trend_3d=_ph_trend,
-                )
-                if predicted_peak is None:
-                    predicted_peak = int(avg_peak_hour)
-                _gemini_bot_state["last_predicted_peak"] = predicted_peak
-                _gemini_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                historical_context = _fetch_historical_context(db, city_key)
+                min_hour = _min_bet_hour(db, city_key)
+                _gemini_bot_state["last_min_bet_hour"] = min_hour
+                _gemini_bot_state["last_window"] = f"{min_hour:02d}:00+"
+                if current_hour < min_hour:
                     continue
 
                 advice = await gemini_analyze(
@@ -3048,8 +2958,8 @@ async def startup():
                     metar_obs=metar_obs_list,
                     summary_high=summary_high,
                     brackets=brackets,
-                    peak_history=peak_history,
-                    avg_peak_hour=avg_peak_hour,
+                    historical_context=historical_context,
+                    min_bet_hour=min_hour,
                 )
 
                 executed_count = 0
@@ -3258,7 +3168,7 @@ async def api_ai_bot_status():
         "last_run_at": _ai_bot_state["last_run_at"],
         "last_city": _ai_bot_state["last_city"],
         "last_error": _ai_bot_state["last_error"],
-        "last_predicted_peak": _ai_bot_state["last_predicted_peak"],
+        "last_min_bet_hour": _ai_bot_state["last_min_bet_hour"],
         "last_window": _ai_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,
@@ -3345,7 +3255,7 @@ async def api_gpt_bot_status():
         "last_run_at": _gpt_bot_state["last_run_at"],
         "last_city": _gpt_bot_state["last_city"],
         "last_error": _gpt_bot_state["last_error"],
-        "last_predicted_peak": _gpt_bot_state["last_predicted_peak"],
+        "last_min_bet_hour": _gpt_bot_state["last_min_bet_hour"],
         "last_window": _gpt_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,
@@ -3429,7 +3339,7 @@ async def api_gemini_bot_status():
         "last_run_at": _gemini_bot_state["last_run_at"],
         "last_city": _gemini_bot_state["last_city"],
         "last_error": _gemini_bot_state["last_error"],
-        "last_predicted_peak": _gemini_bot_state["last_predicted_peak"],
+        "last_min_bet_hour": _gemini_bot_state["last_min_bet_hour"],
         "last_window": _gemini_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,

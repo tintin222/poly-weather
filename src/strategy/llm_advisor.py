@@ -49,12 +49,16 @@ def _build_prompt(
     om_hourly: list[dict],
     metar_obs: list[dict],
     summary_high: float | None,
-    brackets: list[dict],   # includes label, yes_price, no_price, yes_token, no_token
-    peak_history: list[dict],
-    avg_peak_hour: float,
+    brackets: list[dict],
+    historical_context: list[dict],
+    min_bet_hour: int,
 ) -> str:
     unit_label = "°F" if unit == "fahrenheit" else "°C"
     U = unit_label
+
+    # Compute avg peak hour from historical context
+    peak_hours = [d["peak_hour"] for d in historical_context if d.get("peak_hour")]
+    avg_peak_hour = sum(peak_hours) / len(peak_hours) if peak_hours else 14.0
 
     # Day completion status
     hours_to_peak = avg_peak_hour - current_local_hour
@@ -103,7 +107,7 @@ def _build_prompt(
         t = o.get("temperature")
         metar_lines.append(f"  {h:02d}:00 | {t}{U}")
 
-    # Format brackets — include market implied probability interpretation
+    # Format brackets
     bracket_lines = []
     for b in brackets:
         label = b["label"]
@@ -113,12 +117,16 @@ def _build_prompt(
             f"  {label:15s} | YES={yp:.3f} ({round(yp*100)}% market prob)  NO={np_:.3f}"
         )
 
-    # Format peak history (last 14 days for better seasonal context)
+    # Format 10-day historical hourly curves (compact: hour:temp pairs, 08:00-20:00)
     hist_lines = []
-    for r in peak_history[:14]:
-        hist_lines.append(
-            f"  {r.get('date', '')} | peak={r.get('peak_temp')}{U} | peak_hour={r.get('peak_hour', '?')}:00"
-        )
+    for day in historical_context:
+        d = day["date"]
+        sh = day.get("summary_high_temp")
+        sh_str = f"{sh}{U}" if sh is not None else "?"
+        ph = day.get("peak_hour", "?")
+        hourly = day.get("hourly", [])
+        temps = " ".join(f"{h['hour']:02d}:{h['temperature']}" for h in hourly)
+        hist_lines.append(f"  {d} | WU high={sh_str} | peak@{ph}:00 | {temps}")
 
     wu_obs_block = "\n".join(obs_lines) if obs_lines else "  (none yet)"
     wu_fc_block = "\n".join(fc_lines) if fc_lines else "  (none available)"
@@ -128,7 +136,7 @@ def _build_prompt(
     hist_block = "\n".join(hist_lines) if hist_lines else "  (no history)"
     summary_str = f"{summary_high}{U} — {summary_high_note}" if summary_high is not None else "not yet available"
 
-    # Compute observed max from wu_obs to surface explicitly — WU summary high often lags
+    # Compute observed max from wu_obs
     obs_temps = [o.get("temperature") for o in wu_obs if o.get("temperature") is not None]
     observed_max = max(obs_temps) if obs_temps else None
     if observed_max is not None and summary_high is not None and observed_max > summary_high:
@@ -138,7 +146,7 @@ def _build_prompt(
     else:
         observed_max_note = "No observations yet today"
 
-    # Identify market leader (highest YES-priced bracket) for late-day warnings
+    # Market leader warning
     market_leader_line = ""
     if brackets:
         leader = max(brackets, key=lambda b: float(b.get("yes_price") or 0))
@@ -170,9 +178,9 @@ Day status: {day_status}
 ## METAR / ASOS Readings (aviation weather, independent source)
 {metar_block}
 
-## Recent Peak History (last 14 days — use to judge typical daily range and peak timing)
+## 10-Day Historical Temperature Curves (WU hourly 08:00-20:00, format: HH:temp)
 {hist_block}
-City avg peak hour: {avg_peak_hour:.1f}:00
+Min peak hour (last 10 days): {min_bet_hour}:00 | Avg peak hour: {avg_peak_hour:.1f}:00
 
 ## Polymarket Brackets & Current Prices
 {bracket_block}
@@ -181,20 +189,21 @@ Note: Market prices reflect the collective probability estimate of all traders. 
 ---
 
 Your task:
-1. Estimate today's FINAL WU summary high (at day's end, not now).
-2. Determine which bracket that falls into.
-3. Recommend BUY_YES / BUY_NO / SKIP for EVERY bracket.
+1. Study the 10-day historical curves above to understand this city's typical temperature pattern and peak timing.
+2. Compare today's observations and forecasts against that pattern.
+3. Estimate today's FINAL WU summary high (at day's end, not now).
+4. Determine which bracket that falls into.
+5. Recommend BUY_YES / BUY_NO / SKIP for EVERY bracket.
 
 Critical reasoning rules:
-- If day status is EARLY or NEAR PEAK: the WU summary high is NOT the final value. Forecasts showing higher temps are credible — use them. The current summary high is just a floor.
-- If day status is LATE: use the OBSERVED MAX as your temperature floor (not the summary high — it often lags real readings by 30–60 minutes). If the observed max exceeds the summary high, trust the observed max.
-- NEVER anchor your peak estimate purely on the current summary high when it's early in the day and forecasts show higher temps coming.
-- MARKET RESPECT: The market price is a very strong prior. If a bracket is priced ≥60%, treat it as highly credible. You may only bet YES on a different bracket if you have concrete observed temperatures (actual WU readings or METAR) — not just forecasts — that directly contradict the market.
-- In LATE day status: forecasts alone are NOT sufficient evidence to override a strongly-priced market bracket. Prefer SKIP over making contrarian bets based on forecasts.
-- BUY_YES only on the bracket you are genuinely confident will win AND the price gives real edge (your confidence substantially exceeds the market price).
+- You are seeing this data because the current hour >= {min_bet_hour}:00 (earliest historical peak in 10 days). Use the hourly curves to judge whether today's peak has likely occurred or is still coming.
+- If day status is EARLY or NEAR PEAK: the WU summary high is NOT the final value. Forecasts showing higher temps are credible. The current summary high is just a floor.
+- If day status is LATE: use the OBSERVED MAX as your temperature floor (not the summary high — it often lags by 30–60 minutes).
+- MARKET RESPECT: If a bracket is priced ≥60%, treat it as highly credible. Only bet YES on a different bracket if you have concrete observed temperatures (not just forecasts) directly contradicting the market.
+- In LATE day status: forecasts alone are NOT sufficient to override a strongly-priced market bracket. Prefer SKIP.
+- BUY_YES only on the bracket you are genuinely confident will win AND the price gives real edge.
 - BUY_NO on brackets clearly excluded by evidence (price > 0.03, meaning there's value to capture).
 - SKIP when evidence is ambiguous or your edge is small.
-- Lower your confidence when: it is early in the day, forecasts disagree, historical peaks vary widely for this city.
 
 Respond ONLY with this JSON:
 {{
@@ -227,8 +236,8 @@ async def analyze(
     metar_obs: list[dict],
     summary_high: float | None,
     brackets: list[dict],
-    peak_history: list[dict],
-    avg_peak_hour: float,
+    historical_context: list[dict],
+    min_bet_hour: int,
 ) -> LLMAdvice:
     """Call Claude to analyze all weather data and return bracket recommendations."""
     import anthropic
@@ -244,8 +253,8 @@ async def analyze(
         metar_obs=metar_obs,
         summary_high=summary_high,
         brackets=brackets,
-        peak_history=peak_history,
-        avg_peak_hour=avg_peak_hour,
+        historical_context=historical_context,
+        min_bet_hour=min_bet_hour,
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)

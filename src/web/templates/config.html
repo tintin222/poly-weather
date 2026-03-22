@@ -35,9 +35,7 @@
       <nav class="flex gap-3 text-[11px]">
         <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
-        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
-        <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
-        <a href="/gemini-betting" class="text-term-muted hover:text-term-text">Gemini Bot</a>
+        <a href="/bots" class="text-term-muted hover:text-term-text">Bots</a>
         <a href="/pnl-comparison" class="text-term-muted hover:text-term-text">P&amp;L</a>
         <a href="/config" class="text-term-cyan">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
@@ -70,6 +68,49 @@
         </div>
       </div>
       <div class="mt-4 text-[11px] text-term-muted" id="bal-detail"></div>
+    </div>
+
+    <!-- Per-Bot Performance -->
+    <div class="card rounded-md p-6">
+      <h2 class="font-display font-semibold text-term-bright text-lg mb-4">Per-Bot Performance</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="per-bot-cards">
+        <div class="bg-term-bg rounded-md p-4 border border-term-border" id="bot-card-claude">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-term-cyan"></div>
+            <span class="text-term-cyan font-semibold text-sm">Claude Haiku</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-[11px]">
+            <div><span class="text-term-muted">Bets:</span> <span id="claude-pb-bets" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">Win Rate:</span> <span id="claude-pb-wr" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">W/L/P:</span> <span id="claude-pb-wlp" class="text-term-text">–</span></div>
+            <div><span class="text-term-muted">PnL:</span> <span id="claude-pb-pnl" class="font-bold">–</span></div>
+          </div>
+        </div>
+        <div class="bg-term-bg rounded-md p-4 border border-term-border" id="bot-card-gpt">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-term-purple"></div>
+            <span class="text-term-purple font-semibold text-sm">GPT-5.4-mini</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-[11px]">
+            <div><span class="text-term-muted">Bets:</span> <span id="gpt-pb-bets" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">Win Rate:</span> <span id="gpt-pb-wr" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">W/L/P:</span> <span id="gpt-pb-wlp" class="text-term-text">–</span></div>
+            <div><span class="text-term-muted">PnL:</span> <span id="gpt-pb-pnl" class="font-bold">–</span></div>
+          </div>
+        </div>
+        <div class="bg-term-bg rounded-md p-4 border border-term-border" id="bot-card-gemini">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-term-green"></div>
+            <span class="text-term-green font-semibold text-sm">Gemini Flash</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-[11px]">
+            <div><span class="text-term-muted">Bets:</span> <span id="gemini-pb-bets" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">Win Rate:</span> <span id="gemini-pb-wr" class="text-term-bright">–</span></div>
+            <div><span class="text-term-muted">W/L/P:</span> <span id="gemini-pb-wlp" class="text-term-text">–</span></div>
+            <div><span class="text-term-muted">PnL:</span> <span id="gemini-pb-pnl" class="font-bold">–</span></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Config Form -->
@@ -150,6 +191,22 @@
       document.getElementById('cfg-maxdaily').value = c.max_daily_exposure;
       document.getElementById('cfg-minedge').value = (c.min_edge * 100).toFixed(0);
 
+      // Per-bot stats
+      const perBot = {};
+      for (const row of (data.per_bot || [])) perBot[row.llm_source] = row;
+      for (const bot of ['claude', 'gpt', 'gemini']) {
+        const r = perBot[bot];
+        if (r) {
+          document.getElementById(`${bot}-pb-bets`).textContent = r.total_bets;
+          const wr = r.total_bets > 0 ? (r.win_rate * 100).toFixed(1) + '%' : '–';
+          document.getElementById(`${bot}-pb-wr`).textContent = wr;
+          document.getElementById(`${bot}-pb-wlp`).textContent = `${r.wins}/${r.losses}/${r.pending_bets}`;
+          const pnlEl = document.getElementById(`${bot}-pb-pnl`);
+          pnlEl.textContent = `${r.total_pnl >= 0 ? '+' : ''}$${r.total_pnl.toFixed(2)}`;
+          pnlEl.className = `font-bold ${r.total_pnl >= 0 ? 'text-term-green' : 'text-term-red'}`;
+        }
+      }
+
       // Bet history
       renderBets(data.bets);
     }
@@ -162,21 +219,26 @@
       }
 
       let html = '<table class="w-full text-[11px]"><thead><tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">';
-      html += '<th class="px-4 py-2">City</th><th class="px-2 py-2">Date</th><th class="px-2 py-2">Bracket</th>';
+      html += '<th class="px-4 py-2">City</th><th class="px-2 py-2">Date</th><th class="px-2 py-2">Bot</th><th class="px-2 py-2">Bracket</th>';
       html += '<th class="px-2 py-2 text-right">Price</th><th class="px-2 py-2 text-right">Cost</th>';
       html += '<th class="px-2 py-2 text-right">Edge</th><th class="px-2 py-2 text-center">Result</th>';
       html += '<th class="px-2 py-2 text-right">P&L</th></tr></thead><tbody>';
+
+      const botColors = { claude: '#00c8ff', gpt: '#775dd0', gemini: '#00e396' };
 
       bets.forEach(b => {
         const edge = (b.expected_value * 100).toFixed(0);
         const resultClass = b.won === 1 ? 'text-term-green' : b.won === 0 ? 'text-term-red' : 'text-term-amber';
         const resultText = b.won === 1 ? 'WON' : b.won === 0 ? 'LOST' : 'PENDING';
         const pnl = b.pnl != null ? `${b.pnl >= 0 ? '+' : ''}$${b.pnl.toFixed(2)}` : '--';
+        const src = b.llm_source || 'claude';
+        const botColor = botColors[src] || '#8b9fc0';
 
         html += `<tr class="border-t border-term-border/30">
           <td class="px-4 py-2 text-term-bright">${b.city_key}</td>
           <td class="px-2 py-2 text-term-muted">${b.date}</td>
-          <td class="px-2 py-2"><span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">${b.bracket_label}</span></td>
+          <td class="px-2 py-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-semibold" style="color:${botColor};background:${botColor}18;border:1px solid ${botColor}33">${src}</span></td>
+          <td class="px-2 py-2"><span class="px-1.5 py-0.5 rounded bg-term-surface text-term-text text-[10px]">${b.bracket_label}</span></td>
           <td class="px-2 py-2 text-right">${(b.price * 100).toFixed(0)}¢</td>
           <td class="px-2 py-2 text-right">$${b.cost.toFixed(2)}</td>
           <td class="px-2 py-2 text-right text-term-green">+${edge}%</td>

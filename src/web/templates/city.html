@@ -44,9 +44,7 @@
       <nav class="flex gap-3 text-[11px]">
         <a href="/" class="text-term-muted hover:text-term-text">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
-        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
-        <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
-        <a href="/gemini-betting" class="text-term-muted hover:text-term-text">Gemini Bot</a>
+        <a href="/bots" class="text-term-muted hover:text-term-text">Bots</a>
         <a href="/pnl-comparison" class="text-term-muted hover:text-term-text">P&amp;L</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
@@ -76,7 +74,7 @@
                class="flex items-center gap-1 px-2 py-1 rounded bg-term-cyan/10 text-term-cyan border border-term-cyan/20 text-[10px] hover:bg-term-cyan/20">
               <span>⛅</span> Weather Underground
             </a>
-            <a href="https://polymarket.com/markets?q={{ city.display_name | urlencode }}&tag=temperature" target="_blank"
+            <a id="header-pm-link" href="https://polymarket.com/markets?q={{ city.display_name | urlencode }}&tag=temperature" target="_blank"
                class="flex items-center gap-1 px-2 py-1 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[10px] hover:bg-term-purple/20">
               <span>📈</span> Polymarket
             </a>
@@ -1025,6 +1023,8 @@
         const link = document.getElementById('mkt-pm-link');
         link.href = `https://polymarket.com/event/${ev.slug}`;
         link.classList.remove('hidden');
+        const headerLink = document.getElementById('header-pm-link');
+        if (headerLink) headerLink.href = `https://polymarket.com/event/${ev.slug}`;
       }
       if (ev.updated_at) {
         document.getElementById('mkt-updated-at').textContent = timeAgo(ev.updated_at);

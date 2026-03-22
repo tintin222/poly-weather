@@ -94,42 +94,73 @@ def _tiered_bet_size(confidence: float, price: float) -> float:
     return 0.0
 
 
-def _get_best_active_event_brackets(db, city_key: str, today: str) -> tuple[list[dict], str]:
-    """Return (brackets, event_date) for the best tradeable active event.
+def _ml_predicted_peak_hour(
+    ml_trainer,
+    city_key: str,
+    today_obs: list[dict],
+    rolling_peak_hour: float,
+    day_of_year: int,
+    peak_hour_yesterday: float,
+    peak_hour_2d_ago: float,
+    peak_hour_trend_3d: float,
+) -> int | None:
+    """Scan hours 6-20, return the hour with highest ML P(peak) for today.
 
-    Tries today first. If today's event has no brackets in the tradeable range
-    (0.05–0.95 YES price), falls back to tomorrow's event.
-    Returns ([], today) if no tradeable event is found at all.
+    Calls predict_is_peak() for each candidate hour using today's actual
+    observations as the feature baseline. Returns None only when no model
+    has been trained for this city yet.
     """
-    import datetime as _dt
-    tomorrow = (_dt.date.fromisoformat(today) + _dt.timedelta(days=1)).isoformat()
+    best_hour = None
+    best_prob = -1.0
+    for h in range(6, 21):
+        prob = ml_trainer.predict_is_peak(
+            city_key=city_key,
+            current_hour=h,
+            today_obs=today_obs,
+            rolling_peak_hour=rolling_peak_hour,
+            day_of_year=day_of_year,
+            peak_hour_yesterday=peak_hour_yesterday,
+            peak_hour_2d_ago=peak_hour_2d_ago,
+            peak_hour_trend_3d=peak_hour_trend_3d,
+        )
+        if prob is not None and prob > best_prob:
+            best_prob = prob
+            best_hour = h
+    return best_hour
 
-    for candidate_date in (today, tomorrow):
-        events = db.conn.execute(
-            "SELECT event_id FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ?",
-            (city_key, candidate_date),
+
+def _get_best_active_event_brackets(db, city_key: str, today: str) -> tuple[list[dict], str]:
+    """Return (brackets, event_date) for today's tradeable active event.
+
+    Only looks at today's event — bots never bet on future dates since
+    there would be no same-day observational data to inform the decision.
+    Returns ([], today) if no tradeable event is found.
+    """
+    events = db.conn.execute(
+        "SELECT event_id FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ?",
+        (city_key, today),
+    ).fetchall()
+    brackets: list[dict] = []
+    for ev in events:
+        brows = db.conn.execute(
+            "SELECT id, bracket_label, current_yes_price, current_no_price, "
+            "clob_token_id_yes, clob_token_id_no FROM polymarket_brackets WHERE event_id = ?",
+            (ev["event_id"],),
         ).fetchall()
-        brackets: list[dict] = []
-        for ev in events:
-            brows = db.conn.execute(
-                "SELECT id, bracket_label, current_yes_price, current_no_price, "
-                "clob_token_id_yes, clob_token_id_no FROM polymarket_brackets WHERE event_id = ?",
-                (ev["event_id"],),
-            ).fetchall()
-            for b in brows:
-                yp = b["current_yes_price"] or 0.0
-                np_ = round(1.0 - yp, 4) if yp else 0.0
-                brackets.append({
-                    "label": b["bracket_label"],
-                    "yes_price": yp,
-                    "no_price": np_,
-                    "yes_token_id": b["clob_token_id_yes"] or "",
-                    "no_token_id": b["clob_token_id_no"] or "",
-                    "db_id": b["id"],
-                    "event_id": ev["event_id"],
-                })
-        if any(0.05 <= b["yes_price"] <= 0.95 for b in brackets):
-            return brackets, candidate_date
+        for b in brows:
+            yp = b["current_yes_price"] or 0.0
+            np_ = round(1.0 - yp, 4) if yp else 0.0
+            brackets.append({
+                "label": b["bracket_label"],
+                "yes_price": yp,
+                "no_price": np_,
+                "yes_token_id": b["clob_token_id_yes"] or "",
+                "no_token_id": b["clob_token_id_no"] or "",
+                "db_id": b["id"],
+                "event_id": ev["event_id"],
+            })
+    if any(0.05 <= b["yes_price"] <= 0.95 for b in brackets):
+        return brackets, today
     return [], today
 
 
@@ -1064,6 +1095,19 @@ async def api_paper_account():
         ORDER BY b.created_at DESC LIMIT 50
     """).fetchall()
 
+    # Per-bot breakdown
+    per_bot_rows = conn.execute("""
+        SELECT llm_source,
+               COUNT(*) as total_bets,
+               SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN won=0 THEN 1 ELSE 0 END) as losses,
+               SUM(CASE WHEN won IS NULL THEN 1 ELSE 0 END) as pending_bets,
+               COALESCE(SUM(pnl), 0) as total_pnl,
+               COALESCE(AVG(CASE WHEN won IS NOT NULL THEN CAST(won AS REAL) END), 0) as win_rate
+        FROM bets WHERE is_paper = 1
+        GROUP BY llm_source
+    """).fetchall()
+
     return {
         "config": {
             "initial_balance": initial_balance,
@@ -1087,6 +1131,7 @@ async def api_paper_account():
             "pending": pending,
             "win_rate": round(won / (won + lost) * 100, 1) if (won + lost) > 0 else 0,
         },
+        "per_bot": [dict(r) for r in per_bot_rows],
         "bets": [dict(r) for r in recent],
     }
 
@@ -1152,6 +1197,12 @@ async def api_reset_paper_account():
 async def config_page(request: Request):
     """Config page for paper trading settings."""
     return templates.TemplateResponse("config.html", {"request": request})
+
+
+@app.get("/bots", response_class=HTMLResponse)
+async def bots_page(request: Request):
+    """Unified bots control page."""
+    return templates.TemplateResponse("bots.html", {"request": request})
 
 
 # ---------------------------------------------------------------------------
@@ -2181,15 +2232,13 @@ async def startup():
 
         # Refresh city list at the start of each cycle (when index wraps around)
         if _ai_bot_state["city_index"] == 0 or not _ai_bot_state["city_keys"]:
-            # Find all cities that have active events today or tomorrow (forward-looking)
+            # Find all cities that have an active event today (bots only bet on today's events)
             active_keys: list[str] = []
             for ck, city in CITIES.items():
                 today = today_in_tz(city.timezone)
-                import datetime as _dt2
-                tomorrow = (_dt2.date.fromisoformat(today) + _dt2.timedelta(days=1)).isoformat()
                 row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? AND date <= ? LIMIT 1",
-                    (ck, today, tomorrow),
+                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                    (ck, today),
                 ).fetchone()
                 if row:
                     active_keys.append(ck)
@@ -2213,8 +2262,14 @@ async def startup():
         today = today_in_tz(city.timezone)
         current_hour = current_hour_in_tz(city.timezone)
 
+        # Strategy: only bet during the informed window — after 07:00 local (enough
+        # same-day observations exist) and before avg_peak_hour+2 (peak still upcoming).
+        # Upper cutoff is enforced after avg_peak_hour is fetched inside the try block.
+        if current_hour < 7:
+            return
+
         try:
-            # Find best tradeable event (today or tomorrow if today is fully settled)
+            # Find best tradeable event — today only
             brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
             if not brackets:
                 return
@@ -2273,6 +2328,32 @@ async def startup():
             ).fetchone()
             avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
+            # Use ML model to predict today's peak hour from actual morning observations.
+            # Scan hours 6-20 and pick the hour with highest P(peak). Fall back to
+            # historical average if no model is trained for this city yet.
+            import datetime as _dt_module
+            _event_dt = _dt_module.date.fromisoformat(event_date)
+            _doy = _event_dt.timetuple().tm_yday
+            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                            if len(peak_history) >= 3 else 0.0
+            predicted_peak = _ml_predicted_peak_hour(
+                ml_trainer=get_ml_trainer(),
+                city_key=city_key,
+                today_obs=wu_obs,
+                rolling_peak_hour=avg_peak_hour,
+                day_of_year=_doy,
+                peak_hour_yesterday=_ph_yesterday,
+                peak_hour_2d_ago=_ph_2d_ago,
+                peak_hour_trend_3d=_ph_trend,
+            )
+            if predicted_peak is None:
+                predicted_peak = int(avg_peak_hour)  # no model yet — use historical avg
+            # Bet window: 4 hours before through 1 hour after ML-predicted peak
+            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                return
+
             advice = await llm_analyze(
                 api_key=settings.anthropic_api_key,
                 city_name=city.display_name,
@@ -2290,9 +2371,11 @@ async def startup():
             )
 
             # Execute bets — with duplicate guard
+            # Sort by confidence desc so the best YES bet is taken first
             executed_count = 0
+            yes_placed_this_run = False
             trader = PolymarketTrader(settings)
-            for rec in advice.recommendations:
+            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
                 if rec.price <= 0.01:
@@ -2303,6 +2386,11 @@ async def startup():
                 # Cap: don't buy YES when already priced >92¢ (almost no upside)
                 if rec.action == "BUY_YES" and rec.price > 0.92:
                     continue
+                # Only one BUY_YES per event run — brackets are mutually exclusive,
+                # buying YES on two guarantees a net loss.
+                if rec.action == "BUY_YES":
+                    if yes_placed_this_run:
+                        continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
@@ -2336,6 +2424,8 @@ async def startup():
                 )
                 db.conn.commit()
                 executed_count += 1
+                if rec.action == "BUY_YES":
+                    yes_placed_this_run = True
                 log.info(
                     "AI_BOT_BET", city=city_key, bracket=rec.bracket_label,
                     action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
@@ -2397,11 +2487,9 @@ async def startup():
             active_keys: list[str] = []
             for ck, city in CITIES.items():
                 today = today_in_tz(city.timezone)
-                import datetime as _dt3
-                tomorrow = (_dt3.date.fromisoformat(today) + _dt3.timedelta(days=1)).isoformat()
                 row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? AND date <= ? LIMIT 1",
-                    (ck, today, tomorrow),
+                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                    (ck, today),
                 ).fetchone()
                 if row:
                     active_keys.append(ck)
@@ -2424,6 +2512,9 @@ async def startup():
 
         today = today_in_tz(city.timezone)
         current_hour = current_hour_in_tz(city.timezone)
+
+        if current_hour < 7:
+            return
 
         try:
             brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
@@ -2477,6 +2568,28 @@ async def startup():
             ).fetchone()
             avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
+            import datetime as _dt_module
+            _event_dt = _dt_module.date.fromisoformat(event_date)
+            _doy = _event_dt.timetuple().tm_yday
+            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                            if len(peak_history) >= 3 else 0.0
+            predicted_peak = _ml_predicted_peak_hour(
+                ml_trainer=get_ml_trainer(),
+                city_key=city_key,
+                today_obs=wu_obs,
+                rolling_peak_hour=avg_peak_hour,
+                day_of_year=_doy,
+                peak_hour_yesterday=_ph_yesterday,
+                peak_hour_2d_ago=_ph_2d_ago,
+                peak_hour_trend_3d=_ph_trend,
+            )
+            if predicted_peak is None:
+                predicted_peak = int(avg_peak_hour)
+            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                return
+
             advice = await gpt_analyze(
                 api_key=settings.openai_api_key,
                 city_name=city.display_name,
@@ -2494,8 +2607,9 @@ async def startup():
             )
 
             executed_count = 0
+            yes_placed_this_run = False
             trader = PolymarketTrader(settings)
-            for rec in advice.recommendations:
+            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
                 if rec.price <= 0.01:
@@ -2504,6 +2618,9 @@ async def startup():
                     continue
                 if rec.action == "BUY_YES" and rec.price > 0.92:
                     continue
+                if rec.action == "BUY_YES":
+                    if yes_placed_this_run:
+                        continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
@@ -2536,6 +2653,8 @@ async def startup():
                 )
                 db.conn.commit()
                 executed_count += 1
+                if rec.action == "BUY_YES":
+                    yes_placed_this_run = True
                 log.info(
                     "GPT_BOT_BET", city=city_key, bracket=rec.bracket_label,
                     action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
@@ -2595,11 +2714,9 @@ async def startup():
             active_keys: list[str] = []
             for ck, city in CITIES.items():
                 today = today_in_tz(city.timezone)
-                import datetime as _dt4
-                tomorrow = (_dt4.date.fromisoformat(today) + _dt4.timedelta(days=1)).isoformat()
                 row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? AND date <= ? LIMIT 1",
-                    (ck, today, tomorrow),
+                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                    (ck, today),
                 ).fetchone()
                 if row:
                     active_keys.append(ck)
@@ -2622,6 +2739,9 @@ async def startup():
 
         today = today_in_tz(city.timezone)
         current_hour = current_hour_in_tz(city.timezone)
+
+        if current_hour < 7:
+            return
 
         try:
             brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
@@ -2675,6 +2795,28 @@ async def startup():
             ).fetchone()
             avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
+            import datetime as _dt_module
+            _event_dt = _dt_module.date.fromisoformat(event_date)
+            _doy = _event_dt.timetuple().tm_yday
+            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                            if len(peak_history) >= 3 else 0.0
+            predicted_peak = _ml_predicted_peak_hour(
+                ml_trainer=get_ml_trainer(),
+                city_key=city_key,
+                today_obs=wu_obs,
+                rolling_peak_hour=avg_peak_hour,
+                day_of_year=_doy,
+                peak_hour_yesterday=_ph_yesterday,
+                peak_hour_2d_ago=_ph_2d_ago,
+                peak_hour_trend_3d=_ph_trend,
+            )
+            if predicted_peak is None:
+                predicted_peak = int(avg_peak_hour)
+            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
+                return
+
             advice = await gemini_analyze(
                 api_key=settings.gemini_api_key,
                 city_name=city.display_name,
@@ -2692,8 +2834,9 @@ async def startup():
             )
 
             executed_count = 0
+            yes_placed_this_run = False
             trader = PolymarketTrader(settings)
-            for rec in advice.recommendations:
+            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
                 if rec.price <= 0.01:
@@ -2702,6 +2845,9 @@ async def startup():
                     continue
                 if rec.action == "BUY_YES" and rec.price > 0.92:
                     continue
+                if rec.action == "BUY_YES":
+                    if yes_placed_this_run:
+                        continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
@@ -2734,6 +2880,8 @@ async def startup():
                 )
                 db.conn.commit()
                 executed_count += 1
+                if rec.action == "BUY_YES":
+                    yes_placed_this_run = True
                 log.info(
                     "GEMINI_BOT_BET", city=city_key, bracket=rec.bracket_label,
                     action=rec.action, price=rec.price, size=f"${bet_size:.0f}",

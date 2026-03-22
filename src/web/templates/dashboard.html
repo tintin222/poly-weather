@@ -93,9 +93,7 @@
       <nav class="flex gap-3 text-[11px]">
         <a href="/" class="text-term-cyan">Dashboard</a>
         <a href="/opportunities" class="text-term-muted hover:text-term-text">Opportunities</a>
-        <a href="/ai-betting" class="text-term-muted hover:text-term-text">AI Bot</a>
-        <a href="/gpt-betting" class="text-term-muted hover:text-term-text">GPT Bot</a>
-        <a href="/gemini-betting" class="text-term-muted hover:text-term-text">Gemini Bot</a>
+        <a href="/bots" class="text-term-muted hover:text-term-text">Bots</a>
         <a href="/pnl-comparison" class="text-term-muted hover:text-term-text">P&amp;L</a>
         <a href="/config" class="text-term-muted hover:text-term-text">Config</a>
         <a href="/jobs" class="text-term-muted hover:text-term-text">Jobs</a>
@@ -182,6 +180,8 @@
                 <th class="px-4 py-2">City</th>
                 <th class="px-2 py-2">Date</th>
                 <th class="px-2 py-2">Bracket</th>
+                <th class="px-2 py-2 text-center">Side</th>
+                <th class="px-2 py-2 text-center">Bot</th>
                 <th class="px-2 py-2">Placed</th>
                 <th class="px-2 py-2 text-right" title="Price paid per $1 payout — lower = better odds">Odds</th>
                 <th class="px-2 py-2 text-right">Staked</th>
@@ -199,7 +199,33 @@
                 </td>
                 <td class="px-2 py-2 text-term-muted">{{ bet.date }}</td>
                 <td class="px-2 py-2">
-                  <span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">{{ bet.bracket_label }}</span>
+                  <div class="flex items-center gap-1">
+                    <span class="px-1.5 py-0.5 rounded bg-term-cyan/10 text-term-cyan text-[10px]">{{ bet.bracket_label }}</span>
+                    {% if bet.event_slug %}
+                    <a href="https://polymarket.com/event/{{ bet.event_slug }}" target="_blank"
+                       class="px-1 py-0.5 rounded bg-term-purple/10 text-term-purple border border-term-purple/20 text-[9px] hover:bg-term-purple/20" title="Open on Polymarket">PM›</a>
+                    {% endif %}
+                  </div>
+                </td>
+                <td class="px-2 py-2 text-center">
+                  {% if bet.side == 'BUY_YES' %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-green/10 text-term-green border border-term-green/20">YES</span>
+                  {% elif bet.side == 'BUY_NO' %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-red/10 text-term-red border border-term-red/20">NO</span>
+                  {% else %}
+                    <span class="text-term-muted text-[10px]">–</span>
+                  {% endif %}
+                </td>
+                <td class="px-2 py-2 text-center">
+                  {% if bet.llm_source == 'claude' %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-cyan/10 text-term-cyan border border-term-cyan/20">claude</span>
+                  {% elif bet.llm_source == 'gpt' %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-purple/10 text-term-purple border border-term-purple/20">gpt</span>
+                  {% elif bet.llm_source == 'gemini' %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-green/10 text-term-green border border-term-green/20">gemini</span>
+                  {% else %}
+                    <span class="text-term-muted text-[10px]">{{ bet.llm_source or '–' }}</span>
+                  {% endif %}
                 </td>
                 <td class="px-2 py-2 text-term-muted text-[10px]">
                   {% if bet.placed_at %}

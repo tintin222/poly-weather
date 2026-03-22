@@ -56,7 +56,7 @@ async def analyze(
     client = openai.AsyncOpenAI(api_key=api_key)
     message = await client.chat.completions.create(
         model=_MODEL,
-        max_tokens=1500,
+        max_completion_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
 

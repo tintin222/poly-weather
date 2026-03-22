@@ -108,22 +108,27 @@ class MarketMonitor:
         return processed
 
     def _resolve_settled_bets(self) -> int:
-        """Scan closed events and resolve any pending bets.
+        """Scan closed events and active events with a 100%-settled bracket,
+        and resolve any pending bets.
 
         A market is considered settled when exactly one bracket has
-        current_yes_price >= 0.99 (Polymarket settles to 1.00).
+        current_yes_price >= 0.99 (Polymarket settles to 1.00). This can
+        happen while the event status is still 'active' (early settlement).
 
         P&L:
           win  → pnl = size - cost  (each share redeems $1)
           loss → pnl = -cost
         """
         db = self._market_repo._db
-        closed_events = db.conn.execute(
-            "SELECT * FROM polymarket_events WHERE status = 'closed'"
-        ).fetchall()
+        events_to_check = db.conn.execute("""
+            SELECT DISTINCT pe.* FROM polymarket_events pe
+            JOIN polymarket_brackets pb ON pb.event_id = pe.event_id
+            WHERE pe.status = 'closed'
+               OR (pe.status = 'active' AND pb.current_yes_price >= 0.99)
+        """).fetchall()
 
         resolved_count = 0
-        for event in closed_events:
+        for event in events_to_check:
             event_id = event["event_id"]
 
             # Skip if no pending bets

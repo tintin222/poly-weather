@@ -98,6 +98,7 @@
         <div class="space-y-0.5 text-[10px]">
           <div class="text-term-muted">Last run: <span id="claude-lastrun" class="text-term-text">–</span></div>
           <div class="text-term-muted">Last city: <span id="claude-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">ML peak: <span id="claude-peak" class="text-term-cyan">–</span> · window <span id="claude-window" class="text-term-cyan">–</span></div>
           <div id="claude-err" class="hidden text-term-red">Error: <span id="claude-errtext"></span></div>
         </div>
       </div>
@@ -137,6 +138,7 @@
         <div class="space-y-0.5 text-[10px]">
           <div class="text-term-muted">Last run: <span id="gpt-lastrun" class="text-term-text">–</span></div>
           <div class="text-term-muted">Last city: <span id="gpt-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">ML peak: <span id="gpt-peak" class="text-term-purple">–</span> · window <span id="gpt-window" class="text-term-purple">–</span></div>
           <div id="gpt-err" class="hidden text-term-red">Error: <span id="gpt-errtext"></span></div>
         </div>
       </div>
@@ -176,6 +178,7 @@
         <div class="space-y-0.5 text-[10px]">
           <div class="text-term-muted">Last run: <span id="gemini-lastrun" class="text-term-text">–</span></div>
           <div class="text-term-muted">Last city: <span id="gemini-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">ML peak: <span id="gemini-peak" class="text-term-green">–</span> · window <span id="gemini-window" class="text-term-green">–</span></div>
           <div id="gemini-err" class="hidden text-term-red">Error: <span id="gemini-errtext"></span></div>
         </div>
       </div>
@@ -288,6 +291,8 @@
       document.getElementById(`${bot}-cycle`).textContent  = cycle;
       document.getElementById(`${bot}-lastrun`).textContent  = timeSince(s.last_run_at);
       document.getElementById(`${bot}-lastcity`).textContent = s.last_city || '–';
+      document.getElementById(`${bot}-peak`).textContent   = s.last_predicted_peak != null ? `${s.last_predicted_peak}:00` : '–';
+      document.getElementById(`${bot}-window`).textContent = s.last_window || '–';
 
       const errEl = document.getElementById(`${bot}-err`);
       if (s.last_error) {

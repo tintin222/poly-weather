@@ -54,6 +54,8 @@ _ai_bot_state: dict = {
     "bets_today": 0,
     "last_city": None,
     "last_error": None,
+    "last_predicted_peak": None,   # ML-predicted peak hour for last city processed
+    "last_window": None,           # betting window string e.g. "07:00–12:00"
 }
 
 _gpt_bot_state: dict = {
@@ -63,6 +65,8 @@ _gpt_bot_state: dict = {
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
+    "last_predicted_peak": None,
+    "last_window": None,
 }
 
 _gemini_bot_state: dict = {
@@ -72,6 +76,8 @@ _gemini_bot_state: dict = {
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
+    "last_predicted_peak": None,
+    "last_window": None,
 }
 
 
@@ -2350,6 +2356,8 @@ async def startup():
             )
             if predicted_peak is None:
                 predicted_peak = int(avg_peak_hour)  # no model yet — use historical avg
+            _ai_bot_state["last_predicted_peak"] = predicted_peak
+            _ai_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
             # Bet window: 4 hours before through 1 hour after ML-predicted peak
             if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                 return
@@ -2587,6 +2595,8 @@ async def startup():
             )
             if predicted_peak is None:
                 predicted_peak = int(avg_peak_hour)
+            _gpt_bot_state["last_predicted_peak"] = predicted_peak
+            _gpt_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
             if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                 return
 
@@ -2814,6 +2824,8 @@ async def startup():
             )
             if predicted_peak is None:
                 predicted_peak = int(avg_peak_hour)
+            _gemini_bot_state["last_predicted_peak"] = predicted_peak
+            _gemini_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
             if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                 return
 
@@ -3018,6 +3030,8 @@ async def api_ai_bot_status():
         "last_run_at": _ai_bot_state["last_run_at"],
         "last_city": _ai_bot_state["last_city"],
         "last_error": _ai_bot_state["last_error"],
+        "last_predicted_peak": _ai_bot_state["last_predicted_peak"],
+        "last_window": _ai_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,
     }
@@ -3104,6 +3118,8 @@ async def api_gpt_bot_status():
         "last_run_at": _gpt_bot_state["last_run_at"],
         "last_city": _gpt_bot_state["last_city"],
         "last_error": _gpt_bot_state["last_error"],
+        "last_predicted_peak": _gpt_bot_state["last_predicted_peak"],
+        "last_window": _gpt_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,
     }
@@ -3187,6 +3203,8 @@ async def api_gemini_bot_status():
         "last_run_at": _gemini_bot_state["last_run_at"],
         "last_city": _gemini_bot_state["last_city"],
         "last_error": _gemini_bot_state["last_error"],
+        "last_predicted_peak": _gemini_bot_state["last_predicted_peak"],
+        "last_window": _gemini_bot_state["last_window"],
         "runs_today": runs_today,
         "bets_today": bets_today,
     }

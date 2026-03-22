@@ -514,6 +514,7 @@ async def bets_page(
     request: Request,
     date: str = "",
     city: str = "",
+    bot: str = "",
     sort: str = "created_at",
     order: str = "desc",
     page: int = 1,
@@ -533,6 +534,9 @@ async def bets_page(
     if city:
         conditions.append("b.city_key = ?")
         params.append(city)
+    if bot:
+        conditions.append("b.llm_source = ?")
+        params.append(bot)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     allowed_sort = {"created_at": "b.created_at", "date": "b.date", "city": "b.city_key"}
@@ -575,6 +579,7 @@ async def bets_page(
         "city_keys": city_keys,
         "filter_date": date,
         "filter_city": city,
+        "filter_bot": bot,
         "sort": sort,
         "order": order,
         "page": page,

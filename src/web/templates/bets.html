@@ -112,16 +112,26 @@
             {% endfor %}
           </select>
         </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-term-muted uppercase tracking-wider">Bot</label>
+          <select name="bot">
+            <option value="">All bots</option>
+            <option value="claude"  {% if filter_bot == 'claude'  %}selected{% endif %}>Claude</option>
+            <option value="gpt"     {% if filter_bot == 'gpt'     %}selected{% endif %}>GPT</option>
+            <option value="gemini"  {% if filter_bot == 'gemini'  %}selected{% endif %}>Gemini</option>
+          </select>
+        </div>
         <input type="hidden" name="sort" value="{{ sort }}">
         <input type="hidden" name="order" value="{{ order }}">
         <input type="hidden" name="page" value="1">
         <button type="submit" class="px-3 py-1 bg-term-cyan/10 text-term-cyan border border-term-cyan/30 rounded text-[11px] hover:bg-term-cyan/20 transition-colors">Filter</button>
         <a href="/bets" class="px-3 py-1 bg-term-muted/10 text-term-muted border border-term-muted/20 rounded text-[11px] hover:text-term-text hover:border-term-muted/40 transition-colors">Clear</a>
-        {% if filter_date or filter_city %}
+        {% if filter_date or filter_city or filter_bot %}
         <span class="text-[10px] text-term-amber px-2 py-1 bg-term-amber/10 border border-term-amber/20 rounded">
           Filtered: {{ total }} bets
           {% if filter_date %} · {{ filter_date }}{% endif %}
           {% if filter_city %} · {{ filter_city }}{% endif %}
+          {% if filter_bot %} · {{ filter_bot }}{% endif %}
         </span>
         {% endif %}
       </form>
@@ -190,7 +200,7 @@
             <tr class="text-left text-term-muted uppercase text-[10px] tracking-wider">
               <th class="px-3 py-2">
                 {% set new_order = 'asc' if (sort == 'date' and order == 'desc') else 'desc' %}
-                <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&sort=date&order={{ new_order }}&page=1" class="sort-link text-term-muted hover:text-term-text">
+                <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&bot={{ filter_bot }}&sort=date&order={{ new_order }}&page=1" class="sort-link text-term-muted hover:text-term-text">
                   Date
                   <span class="sort-arrow {% if sort == 'date' %}active{% endif %}">
                     {% if sort == 'date' and order == 'asc' %}▲{% else %}▼{% endif %}
@@ -199,7 +209,7 @@
               </th>
               <th class="px-3 py-2">
                 {% set new_order_city = 'asc' if (sort == 'city' and order == 'desc') else 'desc' %}
-                <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&sort=city&order={{ new_order_city }}&page=1" class="sort-link text-term-muted hover:text-term-text">
+                <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&bot={{ filter_bot }}&sort=city&order={{ new_order_city }}&page=1" class="sort-link text-term-muted hover:text-term-text">
                   City
                   <span class="sort-arrow {% if sort == 'city' %}active{% endif %}">
                     {% if sort == 'city' and order == 'asc' %}▲{% else %}▼{% endif %}
@@ -289,7 +299,7 @@
         </span>
         <div class="flex gap-1">
           {% if page > 1 %}
-            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&sort={{ sort }}&order={{ order }}&page={{ page - 1 }}" class="page-btn">← Prev</a>
+            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&bot={{ filter_bot }}&sort={{ sort }}&order={{ order }}&page={{ page - 1 }}" class="page-btn">← Prev</a>
           {% else %}
             <span class="page-btn disabled">← Prev</span>
           {% endif %}
@@ -297,12 +307,12 @@
           {% set start_p = [1, page - 2]|max %}
           {% set end_p   = [total_pages, page + 2]|min %}
           {% for p in range(start_p, end_p + 1) %}
-            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&sort={{ sort }}&order={{ order }}&page={{ p }}"
+            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&bot={{ filter_bot }}&sort={{ sort }}&order={{ order }}&page={{ p }}"
                class="page-btn {% if p == page %}active{% endif %}">{{ p }}</a>
           {% endfor %}
 
           {% if page < total_pages %}
-            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&sort={{ sort }}&order={{ order }}&page={{ page + 1 }}" class="page-btn">Next →</a>
+            <a href="/bets?date={{ filter_date }}&city={{ filter_city }}&bot={{ filter_bot }}&sort={{ sort }}&order={{ order }}&page={{ page + 1 }}" class="page-btn">Next →</a>
           {% else %}
             <span class="page-btn disabled">Next →</span>
           {% endif %}

@@ -1706,6 +1706,11 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
     # --- Historical context (10-day hourly curves + peaks) ---
     historical_context = _fetch_historical_context(db, city_key)
     min_hour = _min_bet_hour(db, city_key)
+    _manual_pos = db.conn.execute(
+        "SELECT bracket_label, price, cost FROM bets "
+        "WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'claude' AND won IS NULL LIMIT 1",
+        (city_key, event_date),
+    ).fetchone()
 
     # --- Call LLM ---
     try:
@@ -1723,6 +1728,7 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
             brackets=brackets,
             historical_context=historical_context,
             min_bet_hour=min_hour,
+            current_position=dict(_manual_pos) if _manual_pos else None,
         )
     except Exception as exc:
         log.error("llm_analyze_failed", city=city_key, error=str(exc))
@@ -2495,6 +2501,13 @@ async def startup():
                 if current_hour < min_hour:
                     continue
 
+                _claude_pos = db.conn.execute(
+                    "SELECT id, bracket_label, token_id, price, size, cost FROM bets "
+                    "WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'claude' AND won IS NULL LIMIT 1",
+                    (city_key, event_date),
+                ).fetchone()
+                _claude_pos_dict = dict(_claude_pos) if _claude_pos else None
+
                 advice = await llm_analyze(
                     api_key=settings.anthropic_api_key,
                     city_name=city.display_name,
@@ -2509,6 +2522,7 @@ async def startup():
                     brackets=brackets,
                     historical_context=historical_context,
                     min_bet_hour=min_hour,
+                    current_position=_claude_pos_dict,
                 )
 
                 executed_count = 0
@@ -2516,6 +2530,7 @@ async def startup():
                 trader = PolymarketTrader(settings)
                 _claude_cfg = _load_bot_settings(db.conn, "claude")
                 _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                _bracket_prices = {b["label"]: b["yes_price"] for b in brackets}
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -2532,11 +2547,24 @@ async def startup():
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
-                        if db.conn.execute(
-                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'claude' LIMIT 1",
-                            (city_key, event_date),
-                        ).fetchone():
-                            continue
+                        if _claude_pos:
+                            if _claude_pos["bracket_label"] == rec.bracket_label:
+                                continue  # already holding this bracket
+                            # Sell old position, then buy new one
+                            old_sell_price = _bracket_prices.get(_claude_pos["bracket_label"], 0)
+                            if old_sell_price > 0:
+                                sell_order = trader.place_limit_sell(
+                                    token_id=_claude_pos["token_id"], price=old_sell_price, size=_claude_pos["size"])
+                                sell_pnl = round(old_sell_price * _claude_pos["size"] - _claude_pos["cost"], 2)
+                                db.conn.execute(
+                                    "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",
+                                    (sell_pnl, int(time.time()), _claude_pos["id"]))
+                                db.conn.commit()
+                                _claude_pos = None  # cleared
+                                log.info("POSITION_SOLD", city=city_key, old_bracket=_claude_pos_dict["bracket_label"],
+                                         new_bracket=rec.bracket_label, sell_pnl=sell_pnl)
+                            else:
+                                continue  # can't sell at 0
                     if rec.confidence < _claude_cfg["min_confidence"]:
                         continue
                     bet_size = _tiered_bet_size(rec.confidence, rec.price)
@@ -2725,6 +2753,13 @@ async def startup():
                 if current_hour < min_hour:
                     continue
 
+                _gpt_pos = db.conn.execute(
+                    "SELECT id, bracket_label, token_id, price, size, cost FROM bets "
+                    "WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gpt' AND won IS NULL LIMIT 1",
+                    (city_key, event_date),
+                ).fetchone()
+                _gpt_pos_dict = dict(_gpt_pos) if _gpt_pos else None
+
                 advice = await gpt_analyze(
                     api_key=settings.openai_api_key,
                     city_name=city.display_name,
@@ -2739,6 +2774,7 @@ async def startup():
                     brackets=brackets,
                     historical_context=historical_context,
                     min_bet_hour=min_hour,
+                    current_position=_gpt_pos_dict,
                 )
 
                 executed_count = 0
@@ -2746,6 +2782,7 @@ async def startup():
                 trader = PolymarketTrader(settings)
                 _gpt_cfg = _load_bot_settings(db.conn, "gpt")
                 _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                _bracket_prices = {b["label"]: b["yes_price"] for b in brackets}
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -2762,11 +2799,23 @@ async def startup():
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
-                        if db.conn.execute(
-                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gpt' LIMIT 1",
-                            (city_key, event_date),
-                        ).fetchone():
-                            continue
+                        if _gpt_pos:
+                            if _gpt_pos["bracket_label"] == rec.bracket_label:
+                                continue
+                            old_sell_price = _bracket_prices.get(_gpt_pos["bracket_label"], 0)
+                            if old_sell_price > 0:
+                                sell_order = trader.place_limit_sell(
+                                    token_id=_gpt_pos["token_id"], price=old_sell_price, size=_gpt_pos["size"])
+                                sell_pnl = round(old_sell_price * _gpt_pos["size"] - _gpt_pos["cost"], 2)
+                                db.conn.execute(
+                                    "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",
+                                    (sell_pnl, int(time.time()), _gpt_pos["id"]))
+                                db.conn.commit()
+                                log.info("POSITION_SOLD", city=city_key, old_bracket=_gpt_pos_dict["bracket_label"],
+                                         new_bracket=rec.bracket_label, sell_pnl=sell_pnl)
+                                _gpt_pos = None
+                            else:
+                                continue
                     if rec.confidence < _gpt_cfg["min_confidence"]:
                         continue
                     bet_size = _tiered_bet_size(rec.confidence, rec.price)
@@ -2954,6 +3003,13 @@ async def startup():
                 if current_hour < min_hour:
                     continue
 
+                _gemini_pos = db.conn.execute(
+                    "SELECT id, bracket_label, token_id, price, size, cost FROM bets "
+                    "WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gemini' AND won IS NULL LIMIT 1",
+                    (city_key, event_date),
+                ).fetchone()
+                _gemini_pos_dict = dict(_gemini_pos) if _gemini_pos else None
+
                 advice = await gemini_analyze(
                     api_key=settings.gemini_api_key,
                     city_name=city.display_name,
@@ -2968,6 +3024,7 @@ async def startup():
                     brackets=brackets,
                     historical_context=historical_context,
                     min_bet_hour=min_hour,
+                    current_position=_gemini_pos_dict,
                 )
 
                 executed_count = 0
@@ -2975,6 +3032,7 @@ async def startup():
                 trader = PolymarketTrader(settings)
                 _gemini_cfg = _load_bot_settings(db.conn, "gemini")
                 _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
+                _bracket_prices = {b["label"]: b["yes_price"] for b in brackets}
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -2991,11 +3049,23 @@ async def startup():
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
-                        if db.conn.execute(
-                            "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND side LIKE '%YES%' AND llm_source = 'gemini' LIMIT 1",
-                            (city_key, event_date),
-                        ).fetchone():
-                            continue
+                        if _gemini_pos:
+                            if _gemini_pos["bracket_label"] == rec.bracket_label:
+                                continue
+                            old_sell_price = _bracket_prices.get(_gemini_pos["bracket_label"], 0)
+                            if old_sell_price > 0:
+                                sell_order = trader.place_limit_sell(
+                                    token_id=_gemini_pos["token_id"], price=old_sell_price, size=_gemini_pos["size"])
+                                sell_pnl = round(old_sell_price * _gemini_pos["size"] - _gemini_pos["cost"], 2)
+                                db.conn.execute(
+                                    "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",
+                                    (sell_pnl, int(time.time()), _gemini_pos["id"]))
+                                db.conn.commit()
+                                log.info("POSITION_SOLD", city=city_key, old_bracket=_gemini_pos_dict["bracket_label"],
+                                         new_bracket=rec.bracket_label, sell_pnl=sell_pnl)
+                                _gemini_pos = None
+                            else:
+                                continue
                     if rec.confidence < _gemini_cfg["min_confidence"]:
                         continue
                     bet_size = _tiered_bet_size(rec.confidence, rec.price)

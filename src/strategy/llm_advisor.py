@@ -52,6 +52,7 @@ def _build_prompt(
     brackets: list[dict],
     historical_context: list[dict],
     min_bet_hour: int,
+    current_position: dict | None = None,
 ) -> str:
     unit_label = "°F" if unit == "fahrenheit" else "°C"
     U = unit_label
@@ -154,6 +155,12 @@ def _build_prompt(
         if leader_price >= 0.60:
             market_leader_line = f"\n⚠ MARKET LEADER: '{leader['label']}' is priced at {round(leader_price*100)}% YES. This is a very strong market consensus — override it only if you have concrete observed data (not just forecasts) directly contradicting it."
 
+    # Current position info
+    if current_position:
+        position_block = f"  YOU HOLD: YES on {current_position['bracket_label']} (bought at ${current_position['price']:.2f}, cost ${current_position['cost']:.2f})"
+    else:
+        position_block = "  No open position"
+
     return f"""You are a weather-temperature Polymarket bracket trading expert. Analyze multi-source weather data and recommend bracket trades.
 
 ## City: {city_name}
@@ -186,6 +193,9 @@ Min peak hour (last 10 days): {min_bet_hour}:00 | Avg peak hour: {avg_peak_hour:
 {bracket_block}
 Note: Market prices reflect the collective probability estimate of all traders. Large divergence between your estimate and market pricing requires strong justification — the market often knows things you don't (e.g. forecast model updates, recent station data).{market_leader_line}
 
+## Your Current Position
+{position_block}
+
 ---
 
 Your task:
@@ -201,6 +211,7 @@ Critical reasoning rules:
 - If day status is LATE: use the OBSERVED MAX as your temperature floor (not the summary high — it often lags by 30–60 minutes).
 - MARKET RESPECT: If a bracket is priced ≥60%, treat it as highly credible. Only bet YES on a different bracket if you have concrete observed temperatures (not just forecasts) directly contradicting the market.
 - In LATE day status: forecasts alone are NOT sufficient to override a strongly-priced market bracket. Prefer SKIP.
+- POSITION SWITCHING COST: If you already hold a YES position on a bracket, switching to a different bracket costs money (you sell at current market price, losing the bid-ask spread, typically ~5-10% of position value). Only recommend BUY_YES on a DIFFERENT bracket than your current position if you are highly confident the new bracket will win AND the expected gain clearly exceeds the switching cost. If your current position is on the right bracket, recommend SKIP (not BUY_YES again).
 - BUY_YES only on the bracket you are genuinely confident will win AND the price gives real edge.
 - BUY_NO on brackets clearly excluded by evidence (price > 0.03, meaning there's value to capture).
 - SKIP when evidence is ambiguous or your edge is small.
@@ -238,6 +249,7 @@ async def analyze(
     brackets: list[dict],
     historical_context: list[dict],
     min_bet_hour: int,
+    current_position: dict | None = None,
 ) -> LLMAdvice:
     """Call Claude to analyze all weather data and return bracket recommendations."""
     import anthropic
@@ -255,6 +267,7 @@ async def analyze(
         brackets=brackets,
         historical_context=historical_context,
         min_bet_hour=min_bet_hour,
+        current_position=current_position,
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)

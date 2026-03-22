@@ -247,6 +247,8 @@
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green">WON</span>
                   {% elif bet.won == 0 %}
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red">LOST</span>
+                  {% elif bet.won == 2 %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-purple/10 text-term-purple">SOLD</span>
                   {% else %}
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">
                       {% if bet.is_paper %}PAPER{% else %}OPEN{% endif %}
@@ -325,6 +327,8 @@
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-green/10 text-term-green font-medium">WON</span>
                   {% elif row.bet_won == 0 %}
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-red/10 text-term-red font-medium">LOST</span>
+                  {% elif row.bet_won == 2 %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-purple/10 text-term-purple font-medium">SOLD</span>
                   {% elif row.bet_bracket %}
                     <span class="px-1.5 py-0.5 rounded text-[10px] bg-term-amber/10 text-term-amber">open</span>
                   {% else %}

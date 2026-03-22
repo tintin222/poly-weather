@@ -139,6 +139,71 @@ class PolymarketTrader:
                 error_msg=str(exc),
             )
 
+    def place_limit_sell(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        tick_size: str = "0.01",
+        neg_risk: bool = False,
+    ) -> OrderResult:
+        """Place a limit sell order (close an existing position)."""
+        if self._paper_mode:
+            return self._paper_trade(token_id, price, size, "SELL")
+
+        if self._clob_client is None:
+            return OrderResult(success=False, error_msg="CLOB client not initialized")
+
+        try:
+            from py_clob_client.order_builder.constants import SELL
+
+            order_args = {
+                "token_id": token_id,
+                "price": price,
+                "size": size,
+                "side": SELL,
+            }
+            if tick_size:
+                order_args["tick_size"] = tick_size
+
+            signed_order = self._clob_client.create_and_post_order(order_args)
+
+            order_id = ""
+            status = "UNKNOWN"
+            success = False
+
+            if isinstance(signed_order, dict):
+                order_id = signed_order.get("orderID", signed_order.get("id", ""))
+                status = signed_order.get("status", "SUBMITTED")
+                success = signed_order.get("success", status != "ERROR")
+                error_msg = signed_order.get("errorMsg")
+            else:
+                order_id = str(signed_order) if signed_order else ""
+                status = "SUBMITTED"
+                success = bool(signed_order)
+                error_msg = None
+
+            log.info(
+                "sell_order_placed",
+                order_id=order_id,
+                token_id=token_id[:16],
+                price=price,
+                size=size,
+                status=status,
+            )
+
+            return OrderResult(
+                order_id=order_id,
+                status=status,
+                success=success,
+                error_msg=error_msg,
+                is_paper=False,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            log.error("sell_order_error", token_id=token_id[:16], price=price, size=size, error=str(exc))
+            return OrderResult(success=False, error_msg=str(exc))
+
     def get_open_orders(self) -> list[dict]:
         """Get all open orders.
 

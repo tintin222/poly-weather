@@ -34,6 +34,7 @@ async def analyze(
     brackets: list[dict],
     historical_context: list[dict],
     min_bet_hour: int,
+    current_position: dict | None = None,
 ) -> LLMAdvice:
     """Call Gemini to analyze all weather data and return bracket recommendations."""
     from google import genai
@@ -52,6 +53,7 @@ async def analyze(
         brackets=brackets,
         historical_context=historical_context,
         min_bet_hour=min_bet_hour,
+        current_position=current_position,
     )
 
     client = genai.Client(api_key=api_key)

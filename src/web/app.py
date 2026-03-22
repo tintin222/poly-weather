@@ -1737,6 +1737,7 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
     executed: list[dict] = []
     if execute:
         trader = PolymarketTrader(settings)
+        _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
         for rec in advice.recommendations:
             if rec.action == "SKIP" or not rec.token_id:
                 continue
@@ -1744,6 +1745,9 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
                 continue
             # Cap: don't buy NO when it already costs >85¢ (tiny edge, ties up capital)
             if rec.action == "BUY_NO" and rec.price > 0.85:
+                continue
+            # Never bet NO against the market's top bracket
+            if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
                 continue
             # Cap: don't buy YES when already priced >92¢ (almost no upside)
             if rec.action == "BUY_YES" and rec.price > 0.92:
@@ -2545,6 +2549,7 @@ async def startup():
                 yes_placed_this_run = False
                 trader = PolymarketTrader(settings)
                 _claude_cfg = _load_bot_settings(db.conn, "claude")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -2552,6 +2557,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_NO" and rec.price > 0.85:
                         continue
+                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
+                        continue  # never bet NO against the market's top bracket
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
                     if rec.action == "BUY_YES" and rec.price < 0.08:
@@ -2796,6 +2803,7 @@ async def startup():
                 yes_placed_this_run = False
                 trader = PolymarketTrader(settings)
                 _gpt_cfg = _load_bot_settings(db.conn, "gpt")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -2803,6 +2811,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_NO" and rec.price > 0.85:
                         continue
+                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
+                        continue  # never bet NO against the market's top bracket
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
                     if rec.action == "BUY_YES" and rec.price < 0.08:
@@ -3046,6 +3056,7 @@ async def startup():
                 yes_placed_this_run = False
                 trader = PolymarketTrader(settings)
                 _gemini_cfg = _load_bot_settings(db.conn, "gemini")
+                _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
                 for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                     if rec.action == "SKIP" or not rec.token_id:
                         continue
@@ -3053,6 +3064,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_NO" and rec.price > 0.85:
                         continue
+                    if rec.action == "BUY_NO" and rec.bracket_label == _market_leader:
+                        continue  # never bet NO against the market's top bracket
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
                     if rec.action == "BUY_YES" and rec.price < 0.08:

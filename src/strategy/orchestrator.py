@@ -246,10 +246,22 @@ class Orchestrator:
             log.debug("peak_hour_gate_skip", city=city.key, peak_hour=peak_hour)
             return
 
-        # Upgrade to summary high if WU reports a higher official value
+        # Use summary_high only when it's within 2°C of hourly observations.
+        # A larger gap means WU's summary is a stale forecast, not an observed value —
+        # trusting it would select a bracket the temperature never actually reached.
         daily_peak_row = self._weather_repo.get_daily_peak(city.key, today)
         summary_high = daily_peak_row["summary_high_temp"] if daily_peak_row else None
-        bracket_temp = max(max_temp, summary_high or 0.0)
+        if summary_high is not None and summary_high - max_temp > 2:
+            log.info(
+                "summary_high_ignored",
+                city=city.key,
+                hourly_max=max_temp,
+                summary_high=summary_high,
+                gap=round(summary_high - max_temp, 1),
+            )
+            bracket_temp = max_temp
+        else:
+            bracket_temp = max(max_temp, summary_high or 0.0)
 
         # Need historical data for confidence model
         hist_count = self._db.conn.execute(

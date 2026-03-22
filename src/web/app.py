@@ -427,8 +427,7 @@ async def dashboard(request: Request):
         ORDER BY dp.city_key
     """).fetchall()
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "total_bets": total_bets,
         "paper_bets": paper_bets,
         "won_bets": won_bets,
@@ -578,8 +577,7 @@ async def bets_page(
     city_keys = sorted(CITIES.keys())
     total_pages = max(1, (total + per_page - 1) // per_page)
 
-    return templates.TemplateResponse("bets.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "bets.html", {
         "bets": bets,
         "summary": summary,
         "city_keys": city_keys,
@@ -601,7 +599,7 @@ async def bets_page(
 
 @app.get("/opportunities", response_class=HTMLResponse)
 async def opportunities_page(request: Request):
-    return templates.TemplateResponse("opportunities.html", {"request": request})
+    return templates.TemplateResponse(request, "opportunities.html")
 
 
 @app.get("/api/opportunities")
@@ -1353,13 +1351,13 @@ async def api_set_bot_settings(
 @app.get("/config", response_class=HTMLResponse)
 async def config_page(request: Request):
     """Config page for paper trading settings."""
-    return templates.TemplateResponse("config.html", {"request": request})
+    return templates.TemplateResponse(request, "config.html")
 
 
 @app.get("/bots", response_class=HTMLResponse)
 async def bots_page(request: Request):
     """Unified bots control page."""
-    return templates.TemplateResponse("bots.html", {"request": request})
+    return templates.TemplateResponse(request, "bots.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1370,8 +1368,7 @@ async def bots_page(request: Request):
 async def city_detail_page(city_key: str, request: Request):
     from src.weather.cities import get_city
     city = get_city(city_key)
-    return templates.TemplateResponse("city.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "city.html", {
         "city_key": city_key,
         "city": city,
     })
@@ -2023,7 +2020,7 @@ async def api_train_all_models():
 
 @app.get("/jobs", response_class=HTMLResponse)
 async def jobs_page(request: Request):
-    return templates.TemplateResponse("jobs.html", {"request": request})
+    return templates.TemplateResponse(request, "jobs.html")
 
 
 @app.get("/api/jobs")
@@ -2061,7 +2058,7 @@ async def api_job_run(run_id: int):
 
 @app.get("/resolution-urls", response_class=HTMLResponse)
 async def resolution_urls_page(request: Request):
-    return templates.TemplateResponse("resolution_urls.html", {"request": request})
+    return templates.TemplateResponse(request, "resolution_urls.html")
 
 
 @app.get("/api/resolution-urls")
@@ -3140,7 +3137,7 @@ async def _delayed_wu_forecast(delay_seconds: int) -> None:
 
 @app.get("/ai-betting")
 async def ai_betting_page(request: Request):
-    return templates.TemplateResponse("ai_betting.html", {"request": request})
+    return templates.TemplateResponse(request, "ai_betting.html")
 
 
 @app.get("/api/ai-bot/status")
@@ -3235,7 +3232,7 @@ async def api_ai_bot_log(limit: int = 50):
 
 @app.get("/gpt-betting")
 async def gpt_betting_page(request: Request):
-    return templates.TemplateResponse("gpt_betting.html", {"request": request})
+    return templates.TemplateResponse(request, "gpt_betting.html")
 
 
 @app.get("/api/gpt-bot/status")
@@ -3319,7 +3316,7 @@ async def api_gpt_bot_log(limit: int = 50):
 
 @app.get("/gemini-betting")
 async def gemini_betting_page(request: Request):
-    return templates.TemplateResponse("gemini_betting.html", {"request": request})
+    return templates.TemplateResponse(request, "gemini_betting.html")
 
 
 @app.get("/api/gemini-bot/status")
@@ -3403,7 +3400,7 @@ async def api_gemini_bot_log(limit: int = 50):
 
 @app.get("/pnl-comparison")
 async def pnl_comparison_page(request: Request):
-    return templates.TemplateResponse("pnl_comparison.html", {"request": request})
+    return templates.TemplateResponse(request, "pnl_comparison.html")
 
 
 @app.get("/api/pnl-comparison")

@@ -47,8 +47,8 @@ _wu_forecast_cache: dict[str, dict] = {}
 # AI bot state — persists only for this process lifetime (off by default)
 _ai_bot_state: dict = {
     "enabled": False,
-    "city_keys": [],     # ordered list of cities with active events (refreshed each cycle start)
-    "city_index": 0,     # next city to analyze
+    "city_keys": [],        # active cities with today's event (refreshed each tick)
+    "city_last_run": {},    # {city_key: float} — last analysis timestamp per city
     "last_run_at": 0.0,
     "runs_today": 0,
     "bets_today": 0,
@@ -61,7 +61,7 @@ _ai_bot_state: dict = {
 _gpt_bot_state: dict = {
     "enabled": False,
     "city_keys": [],
-    "city_index": 0,
+    "city_last_run": {},
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
@@ -72,7 +72,7 @@ _gpt_bot_state: dict = {
 _gemini_bot_state: dict = {
     "enabled": False,
     "city_keys": [],
-    "city_index": 0,
+    "city_last_run": {},
     "last_run_at": 0.0,
     "last_city": None,
     "last_error": None,
@@ -2280,7 +2280,7 @@ async def startup():
     )
 
     async def _run_llm_auto_bet():
-        """Run LLM analysis + auto-bet for one city per tick (round-robin over active cities)."""
+        """Run LLM analysis + auto-bet for ALL active cities each tick (5-min per-city cooldown)."""
         from config import settings
         from src.weather.cities import get_city, CITIES
         from src.utils.time_utils import today_in_tz, current_hour_in_tz
@@ -2295,250 +2295,231 @@ async def startup():
             return
 
         db = get_db()
+        now = time.time()
+        _COOLDOWN = 300  # analyze each city at most every 5 minutes
 
-        # Refresh city list at the start of each cycle (when index wraps around)
-        if _ai_bot_state["city_index"] == 0 or not _ai_bot_state["city_keys"]:
-            # Find all cities that have an active event today (bots only bet on today's events)
-            active_keys: list[str] = []
-            for ck, city in CITIES.items():
-                today = today_in_tz(city.timezone)
-                row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
-                    (ck, today),
+        # Refresh city list every tick
+        active_keys: list[str] = []
+        for ck, city_obj in CITIES.items():
+            _today = today_in_tz(city_obj.timezone)
+            row = db.conn.execute(
+                "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                (ck, _today),
+            ).fetchone()
+            if row:
+                active_keys.append(ck)
+        _ai_bot_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+
+        for city_key in active_keys:
+            # Per-city cooldown: skip if analyzed within the last 5 minutes
+            if now - _ai_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            # Mark as checked immediately so parallel ticks don't double-fire
+            _ai_bot_state["city_last_run"][city_key] = now
+            _ai_bot_state["last_city"] = city_key
+
+            city = get_city(city_key)
+            if not city:
+                continue
+
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+
+            if current_hour < 7:
+                continue
+
+            try:
+                # Find best tradeable event — today only
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+
+                # WU observations (for the event date)
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date),
+                ).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+
+                # WU summary high (for event date)
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date),
                 ).fetchone()
-                if row:
-                    active_keys.append(ck)
-            _ai_bot_state["city_keys"] = active_keys
-            if not active_keys:
-                return
+                summary_high = peak_row["summary_high_temp"] if peak_row else None
 
-        city_keys = _ai_bot_state["city_keys"]
-        if not city_keys:
-            return
+                # WU forecast from cache
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
-        idx = _ai_bot_state["city_index"] % len(city_keys)
-        city_key = city_keys[idx]
-        _ai_bot_state["city_index"] = (idx + 1) % len(city_keys)
-        _ai_bot_state["last_city"] = city_key
+                # Open-Meteo (filter to event_date so tomorrow forecasts align)
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = [
+                        {"hour": h["hour"], "temperature": h["temperature"], "is_forecast": h.get("is_forecast", False)}
+                        for h in om_data.get("hourly", []) if h.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
 
-        city = get_city(city_key)
-        if not city:
-            return
+                # METAR (filter to event_date)
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [
+                        {"hour": o["hour"], "temperature": o["temperature"]}
+                        for o in metar_data.get("observations", [])
+                        if o.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
 
-        today = today_in_tz(city.timezone)
-        current_hour = current_hour_in_tz(city.timezone)
+                # Historical peak hours
+                hist_peaks = db.conn.execute(
+                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+                    "ORDER BY date DESC LIMIT 14",
+                    (city_key,),
+                ).fetchall()
+                peak_history = [dict(r) for r in hist_peaks]
+                avg_peak_row = db.conn.execute(
+                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                    (city_key,),
+                ).fetchone()
+                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
-        # Strategy: only bet during the informed window — after 07:00 local (enough
-        # same-day observations exist) and before avg_peak_hour+2 (peak still upcoming).
-        # Upper cutoff is enforced after avg_peak_hour is fetched inside the try block.
-        if current_hour < 7:
-            return
-
-        try:
-            # Find best tradeable event — today only
-            brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
-            if not brackets:
-                return
-
-            # WU observations (for the event date — may be empty if event_date is tomorrow)
-            wu_rows = db.conn.execute(
-                "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
-                "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
-                (city_key, event_date),
-            ).fetchall()
-            wu_obs = [dict(r) for r in wu_rows]
-
-            # WU summary high (for event date)
-            peak_row = db.conn.execute(
-                "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
-                (city_key, event_date),
-            ).fetchone()
-            summary_high = peak_row["summary_high_temp"] if peak_row else None
-
-            # WU forecast from cache
-            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
-
-            # Open-Meteo (filter to event_date so tomorrow forecasts align)
-            om_hourly: list[dict] = []
-            try:
-                om_data = await open_meteo.fetch(city)
-                om_hourly = [
-                    {"hour": h["hour"], "temperature": h["temperature"], "is_forecast": h.get("is_forecast", False)}
-                    for h in om_data.get("hourly", []) if h.get("date") == event_date
-                ]
-            except Exception:
-                pass
-
-            # METAR (filter to event_date)
-            metar_obs_list: list[dict] = []
-            try:
-                metar_data = await metar_mod.fetch(city, hours=24)
-                metar_obs_list = [
-                    {"hour": o["hour"], "temperature": o["temperature"]}
-                    for o in metar_data.get("observations", [])
-                    if o.get("date") == event_date
-                ]
-            except Exception:
-                pass
-
-            # Historical peak hours
-            hist_peaks = db.conn.execute(
-                "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                "ORDER BY date DESC LIMIT 14",
-                (city_key,),
-            ).fetchall()
-            peak_history = [dict(r) for r in hist_peaks]
-            avg_peak_row = db.conn.execute(
-                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                (city_key,),
-            ).fetchone()
-            avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-            # Use ML model to predict today's peak hour from actual morning observations.
-            # Scan hours 6-20 and pick the hour with highest P(peak). Fall back to
-            # historical average if no model is trained for this city yet.
-            import datetime as _dt_module
-            _event_dt = _dt_module.date.fromisoformat(event_date)
-            _doy = _event_dt.timetuple().tm_yday
-            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                            if len(peak_history) >= 3 else 0.0
-            predicted_peak = _ml_predicted_peak_hour(
-                ml_trainer=get_ml_trainer(),
-                city_key=city_key,
-                today_obs=wu_obs,
-                rolling_peak_hour=avg_peak_hour,
-                day_of_year=_doy,
-                peak_hour_yesterday=_ph_yesterday,
-                peak_hour_2d_ago=_ph_2d_ago,
-                peak_hour_trend_3d=_ph_trend,
-            )
-            if predicted_peak is None:
-                predicted_peak = int(avg_peak_hour)  # no model yet — use historical avg
-            _ai_bot_state["last_predicted_peak"] = predicted_peak
-            _ai_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-            # Bet window: 4 hours before through 1 hour after ML-predicted peak
-            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
-                return
-
-            advice = await llm_analyze(
-                api_key=settings.anthropic_api_key,
-                city_name=city.display_name,
-                unit=city.unit,
-                today=event_date,
-                current_local_hour=current_hour,
-                wu_obs=wu_obs,
-                wu_forecast=wu_forecast,
-                om_hourly=om_hourly,
-                metar_obs=metar_obs_list,
-                summary_high=summary_high,
-                brackets=brackets,
-                peak_history=peak_history,
-                avg_peak_hour=avg_peak_hour,
-            )
-
-            # Execute bets — with duplicate guard
-            # Sort by confidence desc so the best YES bet is taken first
-            executed_count = 0
-            yes_placed_this_run = False
-            trader = PolymarketTrader(settings)
-            _claude_cfg = _load_bot_settings(db.conn, "claude")
-            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
-                if rec.action == "SKIP" or not rec.token_id:
+                import datetime as _dt_module
+                _event_dt = _dt_module.date.fromisoformat(event_date)
+                _doy = _event_dt.timetuple().tm_yday
+                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                                if len(peak_history) >= 3 else 0.0
+                predicted_peak = _ml_predicted_peak_hour(
+                    ml_trainer=get_ml_trainer(),
+                    city_key=city_key,
+                    today_obs=wu_obs,
+                    rolling_peak_hour=avg_peak_hour,
+                    day_of_year=_doy,
+                    peak_hour_yesterday=_ph_yesterday,
+                    peak_hour_2d_ago=_ph_2d_ago,
+                    peak_hour_trend_3d=_ph_trend,
+                )
+                if predicted_peak is None:
+                    predicted_peak = int(avg_peak_hour)
+                _ai_bot_state["last_predicted_peak"] = predicted_peak
+                _ai_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
+                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                     continue
-                if rec.price <= 0.01:
-                    continue
-                # Cap: don't buy NO when it already costs >85¢ (tiny edge)
-                if rec.action == "BUY_NO" and rec.price > 0.85:
-                    continue
-                # Cap: don't buy YES when already priced >92¢ (almost no upside)
-                if rec.action == "BUY_YES" and rec.price > 0.92:
-                    continue
-                # Only one BUY_YES per event run — brackets are mutually exclusive,
-                # buying YES on two guarantees a net loss.
-                if rec.action == "BUY_YES":
-                    if yes_placed_this_run:
+
+                advice = await llm_analyze(
+                    api_key=settings.anthropic_api_key,
+                    city_name=city.display_name,
+                    unit=city.unit,
+                    today=event_date,
+                    current_local_hour=current_hour,
+                    wu_obs=wu_obs,
+                    wu_forecast=wu_forecast,
+                    om_hourly=om_hourly,
+                    metar_obs=metar_obs_list,
+                    summary_high=summary_high,
+                    brackets=brackets,
+                    peak_history=peak_history,
+                    avg_peak_hour=avg_peak_hour,
+                )
+
+                executed_count = 0
+                yes_placed_this_run = False
+                trader = PolymarketTrader(settings)
+                _claude_cfg = _load_bot_settings(db.conn, "claude")
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action == "SKIP" or not rec.token_id:
                         continue
-                # Per-bot min_confidence filter
-                if rec.confidence < _claude_cfg["min_confidence"]:
-                    continue
-                bet_size = _tiered_bet_size(rec.confidence, rec.price)
-                if bet_size == 0.0:
-                    continue
-                # Per-bot max bet cap
-                bet_size = min(bet_size, _claude_cfg["max_bet_usd"])
-                # Duplicate guard: skip if this bot already bet on this bracket+side today
-                existing = db.conn.execute(
-                    "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'claude' LIMIT 1",
-                    (city_key, event_date, rec.bracket_label, rec.action),
-                ).fetchone()
-                if existing:
-                    continue
+                    if rec.price <= 0.01:
+                        continue
+                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                        continue
+                    if rec.action == "BUY_YES" and rec.price > 0.92:
+                        continue
+                    if rec.action == "BUY_YES":
+                        if yes_placed_this_run:
+                            continue
+                    if rec.confidence < _claude_cfg["min_confidence"]:
+                        continue
+                    bet_size = _tiered_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _claude_cfg["max_bet_usd"])
+                    existing = db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'claude' LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, rec.action),
+                    ).fetchone()
+                    if existing:
+                        continue
 
-                size = round(bet_size / rec.price, 2)
-                cost = round(rec.price * size, 2)
-                # Per-bot daily exposure cap
-                today_spent = db.conn.execute(
-                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'claude' AND date = ?",
-                    (event_date,),
-                ).fetchone()[0]
-                if today_spent + cost > _claude_cfg["max_daily_exposure"]:
-                    break
-                order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute(
+                        "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'claude' AND date = ?",
+                        (event_date,),
+                    ).fetchone()[0]
+                    if today_spent + cost > _claude_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            rec.event_id, rec.bracket_db_id, city_key, event_date,
+                            rec.bracket_label, rec.action, rec.token_id,
+                            rec.price, size, cost,
+                            order.order_id, order.status,
+                            advice.peak_temp_estimate or 0.0,
+                            peak_row["peak_hour"] if peak_row else 0,
+                            rec.confidence, rec.confidence - rec.price,
+                            int(order.is_paper), int(time.time()), "claude",
+                        ),
+                    )
+                    db.conn.commit()
+                    executed_count += 1
+                    if rec.action == "BUY_YES":
+                        yes_placed_this_run = True
+                    log.info(
+                        "AI_BOT_BET", city=city_key, bracket=rec.bracket_label,
+                        action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                        conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                    )
+
+                recs_json = _json.dumps([
+                    {"bracket": r.bracket_label, "action": r.action,
+                     "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
+                    for r in advice.recommendations
+                ])
                 db.conn.execute(
-                    """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
-                       side, token_id, price, size, cost, order_id, order_status,
-                       current_max_temp, peak_hour, model_confidence, expected_value,
-                       is_paper, created_at, llm_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        rec.event_id, rec.bracket_db_id, city_key, event_date,
-                        rec.bracket_label, rec.action, rec.token_id,
-                        rec.price, size, cost,
-                        order.order_id, order.status,
-                        advice.peak_temp_estimate or 0.0,
-                        peak_row["peak_hour"] if peak_row else 0,
-                        rec.confidence, rec.confidence - rec.price,
-                        int(order.is_paper), int(time.time()), "claude",
-                    ),
+                    """INSERT INTO llm_analysis_log
+                       (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
+                        analysis_text, recs_json, bets_executed, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (city_key, event_date, int(time.time()), current_hour,
+                     advice.peak_temp_estimate, advice.peak_confidence,
+                     advice.analysis, recs_json, executed_count, advice.model),
                 )
                 db.conn.commit()
-                executed_count += 1
-                if rec.action == "BUY_YES":
-                    yes_placed_this_run = True
-                log.info(
-                    "AI_BOT_BET", city=city_key, bracket=rec.bracket_label,
-                    action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
-                    conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
-                )
 
-            # Log to DB
-            recs_json = _json.dumps([
-                {"bracket": r.bracket_label, "action": r.action,
-                 "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
-                for r in advice.recommendations
-            ])
-            db.conn.execute(
-                """INSERT INTO llm_analysis_log
-                   (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
-                    analysis_text, recs_json, bets_executed, model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (city_key, event_date, int(time.time()), current_hour,
-                 advice.peak_temp_estimate, advice.peak_confidence,
-                 advice.analysis, recs_json, executed_count, advice.model),
-            )
-            db.conn.commit()
+                _ai_bot_state["last_run_at"] = time.time()
+                _ai_bot_state["runs_today"] += 1
+                _ai_bot_state["bets_today"] += executed_count
+                _ai_bot_state["last_error"] = None
+                log.info("ai_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
 
-            _ai_bot_state["last_run_at"] = time.time()
-            _ai_bot_state["runs_today"] += 1
-            _ai_bot_state["bets_today"] += executed_count
-            _ai_bot_state["last_error"] = None
-            log.info("ai_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
-
-        except Exception as exc:
-            _ai_bot_state["last_error"] = str(exc)
-            log.error("ai_bot_tick_failed", city=city_key, error=str(exc))
+            except Exception as exc:
+                _ai_bot_state["last_error"] = str(exc)
+                log.error("ai_bot_tick_failed", city=city_key, error=str(exc))
 
     _scheduler.add_job(
         _run_llm_auto_bet,
@@ -2548,7 +2529,7 @@ async def startup():
     )
 
     async def _run_gpt_auto_bet() -> None:
-        """Run GPT analysis + auto-bet for one city per tick (round-robin, 30s offset from Claude)."""
+        """Run GPT analysis + auto-bet for ALL active cities each tick (5-min per-city cooldown)."""
         from config import settings
         from src.weather.cities import get_city, CITIES
         from src.utils.time_utils import today_in_tz, current_hour_in_tz
@@ -2563,220 +2544,218 @@ async def startup():
             return
 
         db = get_db()
+        now = time.time()
+        _COOLDOWN = 300
 
-        if _gpt_bot_state["city_index"] == 0 or not _gpt_bot_state["city_keys"]:
-            active_keys: list[str] = []
-            for ck, city in CITIES.items():
-                today = today_in_tz(city.timezone)
-                row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
-                    (ck, today),
+        active_keys: list[str] = []
+        for ck, city_obj in CITIES.items():
+            _today = today_in_tz(city_obj.timezone)
+            row = db.conn.execute(
+                "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                (ck, _today),
+            ).fetchone()
+            if row:
+                active_keys.append(ck)
+        _gpt_bot_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+
+        for city_key in active_keys:
+            if now - _gpt_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            _gpt_bot_state["city_last_run"][city_key] = now
+            _gpt_bot_state["last_city"] = city_key
+
+            city = get_city(city_key)
+            if not city:
+                continue
+
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+
+            if current_hour < 7:
+                continue
+
+            try:
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date),
+                ).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date),
                 ).fetchone()
-                if row:
-                    active_keys.append(ck)
-            _gpt_bot_state["city_keys"] = active_keys
-            if not active_keys:
-                return
+                summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                    peak_row["peak_temp"] if peak_row else None
+                )
 
-        city_keys = _gpt_bot_state["city_keys"]
-        if not city_keys:
-            return
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
-        idx = _gpt_bot_state["city_index"] % len(city_keys)
-        city_key = city_keys[idx]
-        _gpt_bot_state["city_index"] = (idx + 1) % len(city_keys)
-        _gpt_bot_state["last_city"] = city_key
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = om_data.get("hourly", [])
+                except Exception:
+                    pass
 
-        city = get_city(city_key)
-        if not city:
-            return
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [
+                        {"hour": o["hour"], "temperature": o["temperature"]}
+                        for o in metar_data.get("observations", [])
+                        if o.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
 
-        today = today_in_tz(city.timezone)
-        current_hour = current_hour_in_tz(city.timezone)
+                hist_peaks = db.conn.execute(
+                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+                    "ORDER BY date DESC LIMIT 14",
+                    (city_key,),
+                ).fetchall()
+                peak_history = [dict(r) for r in hist_peaks]
+                avg_peak_row = db.conn.execute(
+                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                    (city_key,),
+                ).fetchone()
+                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
-        if current_hour < 7:
-            return
-
-        try:
-            brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
-            if not brackets:
-                return
-
-            wu_rows = db.conn.execute(
-                "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
-                "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
-                (city_key, event_date),
-            ).fetchall()
-            wu_obs = [dict(r) for r in wu_rows]
-
-            peak_row = db.conn.execute(
-                "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
-                (city_key, event_date),
-            ).fetchone()
-            summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
-                peak_row["peak_temp"] if peak_row else None
-            )
-
-            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
-
-            om_hourly: list[dict] = []
-            try:
-                om_data = await open_meteo.fetch(city)
-                om_hourly = om_data.get("hourly", [])
-            except Exception:
-                pass
-
-            metar_obs_list: list[dict] = []
-            try:
-                metar_data = await metar_mod.fetch(city, hours=24)
-                metar_obs_list = [
-                    {"hour": o["hour"], "temperature": o["temperature"]}
-                    for o in metar_data.get("observations", [])
-                    if o.get("date") == event_date
-                ]
-            except Exception:
-                pass
-
-            hist_peaks = db.conn.execute(
-                "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                "ORDER BY date DESC LIMIT 14",
-                (city_key,),
-            ).fetchall()
-            peak_history = [dict(r) for r in hist_peaks]
-            avg_peak_row = db.conn.execute(
-                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                (city_key,),
-            ).fetchone()
-            avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-            import datetime as _dt_module
-            _event_dt = _dt_module.date.fromisoformat(event_date)
-            _doy = _event_dt.timetuple().tm_yday
-            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                            if len(peak_history) >= 3 else 0.0
-            predicted_peak = _ml_predicted_peak_hour(
-                ml_trainer=get_ml_trainer(),
-                city_key=city_key,
-                today_obs=wu_obs,
-                rolling_peak_hour=avg_peak_hour,
-                day_of_year=_doy,
-                peak_hour_yesterday=_ph_yesterday,
-                peak_hour_2d_ago=_ph_2d_ago,
-                peak_hour_trend_3d=_ph_trend,
-            )
-            if predicted_peak is None:
-                predicted_peak = int(avg_peak_hour)
-            _gpt_bot_state["last_predicted_peak"] = predicted_peak
-            _gpt_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
-                return
-
-            advice = await gpt_analyze(
-                api_key=settings.openai_api_key,
-                city_name=city.display_name,
-                unit=city.unit,
-                today=event_date,
-                current_local_hour=current_hour,
-                wu_obs=wu_obs,
-                wu_forecast=wu_forecast,
-                om_hourly=om_hourly,
-                metar_obs=metar_obs_list,
-                summary_high=summary_high,
-                brackets=brackets,
-                peak_history=peak_history,
-                avg_peak_hour=avg_peak_hour,
-            )
-
-            executed_count = 0
-            yes_placed_this_run = False
-            trader = PolymarketTrader(settings)
-            _gpt_cfg = _load_bot_settings(db.conn, "gpt")
-            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
-                if rec.action == "SKIP" or not rec.token_id:
+                import datetime as _dt_module
+                _event_dt = _dt_module.date.fromisoformat(event_date)
+                _doy = _event_dt.timetuple().tm_yday
+                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                                if len(peak_history) >= 3 else 0.0
+                predicted_peak = _ml_predicted_peak_hour(
+                    ml_trainer=get_ml_trainer(),
+                    city_key=city_key,
+                    today_obs=wu_obs,
+                    rolling_peak_hour=avg_peak_hour,
+                    day_of_year=_doy,
+                    peak_hour_yesterday=_ph_yesterday,
+                    peak_hour_2d_ago=_ph_2d_ago,
+                    peak_hour_trend_3d=_ph_trend,
+                )
+                if predicted_peak is None:
+                    predicted_peak = int(avg_peak_hour)
+                _gpt_bot_state["last_predicted_peak"] = predicted_peak
+                _gpt_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
+                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                     continue
-                if rec.price <= 0.01:
-                    continue
-                if rec.action == "BUY_NO" and rec.price > 0.85:
-                    continue
-                if rec.action == "BUY_YES" and rec.price > 0.92:
-                    continue
-                if rec.action == "BUY_YES":
-                    if yes_placed_this_run:
+
+                advice = await gpt_analyze(
+                    api_key=settings.openai_api_key,
+                    city_name=city.display_name,
+                    unit=city.unit,
+                    today=event_date,
+                    current_local_hour=current_hour,
+                    wu_obs=wu_obs,
+                    wu_forecast=wu_forecast,
+                    om_hourly=om_hourly,
+                    metar_obs=metar_obs_list,
+                    summary_high=summary_high,
+                    brackets=brackets,
+                    peak_history=peak_history,
+                    avg_peak_hour=avg_peak_hour,
+                )
+
+                executed_count = 0
+                yes_placed_this_run = False
+                trader = PolymarketTrader(settings)
+                _gpt_cfg = _load_bot_settings(db.conn, "gpt")
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action == "SKIP" or not rec.token_id:
                         continue
-                if rec.confidence < _gpt_cfg["min_confidence"]:
-                    continue
-                bet_size = _tiered_bet_size(rec.confidence, rec.price)
-                if bet_size == 0.0:
-                    continue
-                bet_size = min(bet_size, _gpt_cfg["max_bet_usd"])
-                existing = db.conn.execute(
-                    "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gpt' LIMIT 1",
-                    (city_key, event_date, rec.bracket_label, rec.action),
-                ).fetchone()
-                if existing:
-                    continue
+                    if rec.price <= 0.01:
+                        continue
+                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                        continue
+                    if rec.action == "BUY_YES" and rec.price > 0.92:
+                        continue
+                    if rec.action == "BUY_YES":
+                        if yes_placed_this_run:
+                            continue
+                    if rec.confidence < _gpt_cfg["min_confidence"]:
+                        continue
+                    bet_size = _tiered_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _gpt_cfg["max_bet_usd"])
+                    existing = db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gpt' LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, rec.action),
+                    ).fetchone()
+                    if existing:
+                        continue
 
-                size = round(bet_size / rec.price, 2)
-                cost = round(rec.price * size, 2)
-                today_spent = db.conn.execute(
-                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gpt' AND date = ?",
-                    (event_date,),
-                ).fetchone()[0]
-                if today_spent + cost > _gpt_cfg["max_daily_exposure"]:
-                    break
-                order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute(
+                        "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gpt' AND date = ?",
+                        (event_date,),
+                    ).fetchone()[0]
+                    if today_spent + cost > _gpt_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            rec.event_id, rec.bracket_db_id, city_key, event_date,
+                            rec.bracket_label, rec.action, rec.token_id,
+                            rec.price, size, cost,
+                            order.order_id, order.status,
+                            advice.peak_temp_estimate or 0.0,
+                            peak_row["peak_hour"] if peak_row else 0,
+                            rec.confidence, rec.confidence - rec.price,
+                            int(order.is_paper), int(time.time()), "gpt",
+                        ),
+                    )
+                    db.conn.commit()
+                    executed_count += 1
+                    if rec.action == "BUY_YES":
+                        yes_placed_this_run = True
+                    log.info(
+                        "GPT_BOT_BET", city=city_key, bracket=rec.bracket_label,
+                        action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                        conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                    )
+
+                recs_json = _json.dumps([
+                    {"bracket": r.bracket_label, "action": r.action,
+                     "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
+                    for r in advice.recommendations
+                ])
                 db.conn.execute(
-                    """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
-                       side, token_id, price, size, cost, order_id, order_status,
-                       current_max_temp, peak_hour, model_confidence, expected_value,
-                       is_paper, created_at, llm_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        rec.event_id, rec.bracket_db_id, city_key, event_date,
-                        rec.bracket_label, rec.action, rec.token_id,
-                        rec.price, size, cost,
-                        order.order_id, order.status,
-                        advice.peak_temp_estimate or 0.0,
-                        peak_row["peak_hour"] if peak_row else 0,
-                        rec.confidence, rec.confidence - rec.price,
-                        int(order.is_paper), int(time.time()), "gpt",
-                    ),
+                    """INSERT INTO llm_analysis_log
+                       (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
+                        analysis_text, recs_json, bets_executed, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (city_key, event_date, int(time.time()), current_hour,
+                     advice.peak_temp_estimate, advice.peak_confidence,
+                     advice.analysis, recs_json, executed_count, advice.model),
                 )
                 db.conn.commit()
-                executed_count += 1
-                if rec.action == "BUY_YES":
-                    yes_placed_this_run = True
-                log.info(
-                    "GPT_BOT_BET", city=city_key, bracket=rec.bracket_label,
-                    action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
-                    conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
-                )
 
-            recs_json = _json.dumps([
-                {"bracket": r.bracket_label, "action": r.action,
-                 "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
-                for r in advice.recommendations
-            ])
-            db.conn.execute(
-                """INSERT INTO llm_analysis_log
-                   (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
-                    analysis_text, recs_json, bets_executed, model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (city_key, event_date, int(time.time()), current_hour,
-                 advice.peak_temp_estimate, advice.peak_confidence,
-                 advice.analysis, recs_json, executed_count, advice.model),
-            )
-            db.conn.commit()
+                _gpt_bot_state["last_run_at"] = time.time()
+                _gpt_bot_state["last_error"] = None
+                log.info("gpt_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
 
-            _gpt_bot_state["last_run_at"] = time.time()
-            _gpt_bot_state["last_error"] = None
-            log.info("gpt_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
-
-        except Exception as exc:
-            _gpt_bot_state["last_error"] = str(exc)
-            log.error("gpt_bot_tick_failed", city=city_key, error=str(exc))
+            except Exception as exc:
+                _gpt_bot_state["last_error"] = str(exc)
+                log.error("gpt_bot_tick_failed", city=city_key, error=str(exc))
 
     _scheduler.add_job(
         _run_gpt_auto_bet,
@@ -2787,7 +2766,7 @@ async def startup():
     )
 
     async def _run_gemini_auto_bet() -> None:
-        """Run Gemini analysis + auto-bet for one city per tick (round-robin, 45s offset)."""
+        """Run Gemini analysis + auto-bet for ALL active cities each tick (5-min per-city cooldown)."""
         from config import settings
         from src.weather.cities import get_city, CITIES
         from src.utils.time_utils import today_in_tz, current_hour_in_tz
@@ -2802,220 +2781,218 @@ async def startup():
             return
 
         db = get_db()
+        now = time.time()
+        _COOLDOWN = 300
 
-        if _gemini_bot_state["city_index"] == 0 or not _gemini_bot_state["city_keys"]:
-            active_keys: list[str] = []
-            for ck, city in CITIES.items():
-                today = today_in_tz(city.timezone)
-                row = db.conn.execute(
-                    "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
-                    (ck, today),
+        active_keys: list[str] = []
+        for ck, city_obj in CITIES.items():
+            _today = today_in_tz(city_obj.timezone)
+            row = db.conn.execute(
+                "SELECT 1 FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+                (ck, _today),
+            ).fetchone()
+            if row:
+                active_keys.append(ck)
+        _gemini_bot_state["city_keys"] = active_keys
+        if not active_keys:
+            return
+
+        for city_key in active_keys:
+            if now - _gemini_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
+                continue
+            _gemini_bot_state["city_last_run"][city_key] = now
+            _gemini_bot_state["last_city"] = city_key
+
+            city = get_city(city_key)
+            if not city:
+                continue
+
+            today = today_in_tz(city.timezone)
+            current_hour = current_hour_in_tz(city.timezone)
+
+            if current_hour < 7:
+                continue
+
+            try:
+                brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
+                if not brackets:
+                    continue
+
+                wu_rows = db.conn.execute(
+                    "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
+                    "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
+                    (city_key, event_date),
+                ).fetchall()
+                wu_obs = [dict(r) for r in wu_rows]
+
+                peak_row = db.conn.execute(
+                    "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
+                    (city_key, event_date),
                 ).fetchone()
-                if row:
-                    active_keys.append(ck)
-            _gemini_bot_state["city_keys"] = active_keys
-            if not active_keys:
-                return
+                summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
+                    peak_row["peak_temp"] if peak_row else None
+                )
 
-        city_keys = _gemini_bot_state["city_keys"]
-        if not city_keys:
-            return
+                wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
-        idx = _gemini_bot_state["city_index"] % len(city_keys)
-        city_key = city_keys[idx]
-        _gemini_bot_state["city_index"] = (idx + 1) % len(city_keys)
-        _gemini_bot_state["last_city"] = city_key
+                om_hourly: list[dict] = []
+                try:
+                    om_data = await open_meteo.fetch(city)
+                    om_hourly = om_data.get("hourly", [])
+                except Exception:
+                    pass
 
-        city = get_city(city_key)
-        if not city:
-            return
+                metar_obs_list: list[dict] = []
+                try:
+                    metar_data = await metar_mod.fetch(city, hours=24)
+                    metar_obs_list = [
+                        {"hour": o["hour"], "temperature": o["temperature"]}
+                        for o in metar_data.get("observations", [])
+                        if o.get("date") == event_date
+                    ]
+                except Exception:
+                    pass
 
-        today = today_in_tz(city.timezone)
-        current_hour = current_hour_in_tz(city.timezone)
+                hist_peaks = db.conn.execute(
+                    "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
+                    "ORDER BY date DESC LIMIT 14",
+                    (city_key,),
+                ).fetchall()
+                peak_history = [dict(r) for r in hist_peaks]
+                avg_peak_row = db.conn.execute(
+                    "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
+                    (city_key,),
+                ).fetchone()
+                avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
 
-        if current_hour < 7:
-            return
-
-        try:
-            brackets, event_date = _get_best_active_event_brackets(db, city_key, today)
-            if not brackets:
-                return
-
-            wu_rows = db.conn.execute(
-                "SELECT hour, temperature, humidity, dew_point, condition, wind_speed, wind_direction "
-                "FROM hourly_observations WHERE city_key = ? AND date = ? ORDER BY hour",
-                (city_key, event_date),
-            ).fetchall()
-            wu_obs = [dict(r) for r in wu_rows]
-
-            peak_row = db.conn.execute(
-                "SELECT peak_temp, peak_hour, summary_high_temp FROM daily_peaks WHERE city_key = ? AND date = ?",
-                (city_key, event_date),
-            ).fetchone()
-            summary_high = peak_row["summary_high_temp"] if peak_row and peak_row["summary_high_temp"] else (
-                peak_row["peak_temp"] if peak_row else None
-            )
-
-            wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
-
-            om_hourly: list[dict] = []
-            try:
-                om_data = await open_meteo.fetch(city)
-                om_hourly = om_data.get("hourly", [])
-            except Exception:
-                pass
-
-            metar_obs_list: list[dict] = []
-            try:
-                metar_data = await metar_mod.fetch(city, hours=24)
-                metar_obs_list = [
-                    {"hour": o["hour"], "temperature": o["temperature"]}
-                    for o in metar_data.get("observations", [])
-                    if o.get("date") == event_date
-                ]
-            except Exception:
-                pass
-
-            hist_peaks = db.conn.execute(
-                "SELECT date, peak_temp, peak_hour FROM daily_peaks WHERE city_key = ? AND peak_hour > 0 "
-                "ORDER BY date DESC LIMIT 14",
-                (city_key,),
-            ).fetchall()
-            peak_history = [dict(r) for r in hist_peaks]
-            avg_peak_row = db.conn.execute(
-                "SELECT AVG(peak_hour) as avg FROM daily_peaks WHERE city_key = ? AND peak_hour > 0",
-                (city_key,),
-            ).fetchone()
-            avg_peak_hour = float(avg_peak_row["avg"]) if avg_peak_row and avg_peak_row["avg"] else 14.0
-
-            import datetime as _dt_module
-            _event_dt = _dt_module.date.fromisoformat(event_date)
-            _doy = _event_dt.timetuple().tm_yday
-            _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
-            _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
-            _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
-                            if len(peak_history) >= 3 else 0.0
-            predicted_peak = _ml_predicted_peak_hour(
-                ml_trainer=get_ml_trainer(),
-                city_key=city_key,
-                today_obs=wu_obs,
-                rolling_peak_hour=avg_peak_hour,
-                day_of_year=_doy,
-                peak_hour_yesterday=_ph_yesterday,
-                peak_hour_2d_ago=_ph_2d_ago,
-                peak_hour_trend_3d=_ph_trend,
-            )
-            if predicted_peak is None:
-                predicted_peak = int(avg_peak_hour)
-            _gemini_bot_state["last_predicted_peak"] = predicted_peak
-            _gemini_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
-            if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
-                return
-
-            advice = await gemini_analyze(
-                api_key=settings.gemini_api_key,
-                city_name=city.display_name,
-                unit=city.unit,
-                today=event_date,
-                current_local_hour=current_hour,
-                wu_obs=wu_obs,
-                wu_forecast=wu_forecast,
-                om_hourly=om_hourly,
-                metar_obs=metar_obs_list,
-                summary_high=summary_high,
-                brackets=brackets,
-                peak_history=peak_history,
-                avg_peak_hour=avg_peak_hour,
-            )
-
-            executed_count = 0
-            yes_placed_this_run = False
-            trader = PolymarketTrader(settings)
-            _gemini_cfg = _load_bot_settings(db.conn, "gemini")
-            for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
-                if rec.action == "SKIP" or not rec.token_id:
+                import datetime as _dt_module
+                _event_dt = _dt_module.date.fromisoformat(event_date)
+                _doy = _event_dt.timetuple().tm_yday
+                _ph_yesterday = float(peak_history[0]["peak_hour"]) if peak_history else 14.0
+                _ph_2d_ago    = float(peak_history[1]["peak_hour"]) if len(peak_history) >= 2 else 14.0
+                _ph_trend     = float(peak_history[0]["peak_hour"] - peak_history[2]["peak_hour"]) / 2.0 \
+                                if len(peak_history) >= 3 else 0.0
+                predicted_peak = _ml_predicted_peak_hour(
+                    ml_trainer=get_ml_trainer(),
+                    city_key=city_key,
+                    today_obs=wu_obs,
+                    rolling_peak_hour=avg_peak_hour,
+                    day_of_year=_doy,
+                    peak_hour_yesterday=_ph_yesterday,
+                    peak_hour_2d_ago=_ph_2d_ago,
+                    peak_hour_trend_3d=_ph_trend,
+                )
+                if predicted_peak is None:
+                    predicted_peak = int(avg_peak_hour)
+                _gemini_bot_state["last_predicted_peak"] = predicted_peak
+                _gemini_bot_state["last_window"] = f"{max(7, predicted_peak-4):02d}:00–{predicted_peak+1:02d}:00"
+                if current_hour < predicted_peak - 4 or current_hour > predicted_peak + 1:
                     continue
-                if rec.price <= 0.01:
-                    continue
-                if rec.action == "BUY_NO" and rec.price > 0.85:
-                    continue
-                if rec.action == "BUY_YES" and rec.price > 0.92:
-                    continue
-                if rec.action == "BUY_YES":
-                    if yes_placed_this_run:
+
+                advice = await gemini_analyze(
+                    api_key=settings.gemini_api_key,
+                    city_name=city.display_name,
+                    unit=city.unit,
+                    today=event_date,
+                    current_local_hour=current_hour,
+                    wu_obs=wu_obs,
+                    wu_forecast=wu_forecast,
+                    om_hourly=om_hourly,
+                    metar_obs=metar_obs_list,
+                    summary_high=summary_high,
+                    brackets=brackets,
+                    peak_history=peak_history,
+                    avg_peak_hour=avg_peak_hour,
+                )
+
+                executed_count = 0
+                yes_placed_this_run = False
+                trader = PolymarketTrader(settings)
+                _gemini_cfg = _load_bot_settings(db.conn, "gemini")
+                for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
+                    if rec.action == "SKIP" or not rec.token_id:
                         continue
-                if rec.confidence < _gemini_cfg["min_confidence"]:
-                    continue
-                bet_size = _tiered_bet_size(rec.confidence, rec.price)
-                if bet_size == 0.0:
-                    continue
-                bet_size = min(bet_size, _gemini_cfg["max_bet_usd"])
-                existing = db.conn.execute(
-                    "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gemini' LIMIT 1",
-                    (city_key, event_date, rec.bracket_label, rec.action),
-                ).fetchone()
-                if existing:
-                    continue
+                    if rec.price <= 0.01:
+                        continue
+                    if rec.action == "BUY_NO" and rec.price > 0.85:
+                        continue
+                    if rec.action == "BUY_YES" and rec.price > 0.92:
+                        continue
+                    if rec.action == "BUY_YES":
+                        if yes_placed_this_run:
+                            continue
+                    if rec.confidence < _gemini_cfg["min_confidence"]:
+                        continue
+                    bet_size = _tiered_bet_size(rec.confidence, rec.price)
+                    if bet_size == 0.0:
+                        continue
+                    bet_size = min(bet_size, _gemini_cfg["max_bet_usd"])
+                    existing = db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gemini' LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, rec.action),
+                    ).fetchone()
+                    if existing:
+                        continue
 
-                size = round(bet_size / rec.price, 2)
-                cost = round(rec.price * size, 2)
-                today_spent = db.conn.execute(
-                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gemini' AND date = ?",
-                    (event_date,),
-                ).fetchone()[0]
-                if today_spent + cost > _gemini_cfg["max_daily_exposure"]:
-                    break
-                order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    size = round(bet_size / rec.price, 2)
+                    cost = round(rec.price * size, 2)
+                    today_spent = db.conn.execute(
+                        "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gemini' AND date = ?",
+                        (event_date,),
+                    ).fetchone()[0]
+                    if today_spent + cost > _gemini_cfg["max_daily_exposure"]:
+                        break
+                    order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    db.conn.execute(
+                        """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
+                           side, token_id, price, size, cost, order_id, order_status,
+                           current_max_temp, peak_hour, model_confidence, expected_value,
+                           is_paper, created_at, llm_source)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            rec.event_id, rec.bracket_db_id, city_key, event_date,
+                            rec.bracket_label, rec.action, rec.token_id,
+                            rec.price, size, cost,
+                            order.order_id, order.status,
+                            advice.peak_temp_estimate or 0.0,
+                            peak_row["peak_hour"] if peak_row else 0,
+                            rec.confidence, rec.confidence - rec.price,
+                            int(order.is_paper), int(time.time()), "gemini",
+                        ),
+                    )
+                    db.conn.commit()
+                    executed_count += 1
+                    if rec.action == "BUY_YES":
+                        yes_placed_this_run = True
+                    log.info(
+                        "GEMINI_BOT_BET", city=city_key, bracket=rec.bracket_label,
+                        action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
+                        conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
+                    )
+
+                recs_json = _json.dumps([
+                    {"bracket": r.bracket_label, "action": r.action,
+                     "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
+                    for r in advice.recommendations
+                ])
                 db.conn.execute(
-                    """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
-                       side, token_id, price, size, cost, order_id, order_status,
-                       current_max_temp, peak_hour, model_confidence, expected_value,
-                       is_paper, created_at, llm_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        rec.event_id, rec.bracket_db_id, city_key, event_date,
-                        rec.bracket_label, rec.action, rec.token_id,
-                        rec.price, size, cost,
-                        order.order_id, order.status,
-                        advice.peak_temp_estimate or 0.0,
-                        peak_row["peak_hour"] if peak_row else 0,
-                        rec.confidence, rec.confidence - rec.price,
-                        int(order.is_paper), int(time.time()), "gemini",
-                    ),
+                    """INSERT INTO llm_analysis_log
+                       (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
+                        analysis_text, recs_json, bets_executed, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (city_key, event_date, int(time.time()), current_hour,
+                     advice.peak_temp_estimate, advice.peak_confidence,
+                     advice.analysis, recs_json, executed_count, advice.model),
                 )
                 db.conn.commit()
-                executed_count += 1
-                if rec.action == "BUY_YES":
-                    yes_placed_this_run = True
-                log.info(
-                    "GEMINI_BOT_BET", city=city_key, bracket=rec.bracket_label,
-                    action=rec.action, price=rec.price, size=f"${bet_size:.0f}",
-                    conf=f"{rec.confidence:.0%}", edge=f"{rec.confidence - rec.price:.0%}",
-                )
 
-            recs_json = _json.dumps([
-                {"bracket": r.bracket_label, "action": r.action,
-                 "confidence": r.confidence, "price": r.price, "reasoning": r.reasoning}
-                for r in advice.recommendations
-            ])
-            db.conn.execute(
-                """INSERT INTO llm_analysis_log
-                   (city_key, date, analysis_time, hour_local, peak_estimate, peak_confidence,
-                    analysis_text, recs_json, bets_executed, model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (city_key, event_date, int(time.time()), current_hour,
-                 advice.peak_temp_estimate, advice.peak_confidence,
-                 advice.analysis, recs_json, executed_count, advice.model),
-            )
-            db.conn.commit()
+                _gemini_bot_state["last_run_at"] = time.time()
+                _gemini_bot_state["last_error"] = None
+                log.info("gemini_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
 
-            _gemini_bot_state["last_run_at"] = time.time()
-            _gemini_bot_state["last_error"] = None
-            log.info("gemini_bot_tick", city=city_key, event_date=event_date, bets=executed_count, hour=current_hour)
-
-        except Exception as exc:
-            _gemini_bot_state["last_error"] = str(exc)
-            log.error("gemini_bot_tick_failed", city=city_key, error=str(exc))
+            except Exception as exc:
+                _gemini_bot_state["last_error"] = str(exc)
+                log.error("gemini_bot_tick_failed", city=city_key, error=str(exc))
 
     _scheduler.add_job(
         _run_gemini_auto_bet,
@@ -3117,7 +3094,6 @@ async def api_ai_bot_status():
     ).fetchone()[0]
     return {
         "enabled": _ai_bot_state["enabled"],
-        "city_index": _ai_bot_state["city_index"],
         "active_city_count": len(_ai_bot_state["city_keys"]),
         "active_cities": _ai_bot_state["city_keys"],
         "last_run_at": _ai_bot_state["last_run_at"],
@@ -3134,9 +3110,9 @@ async def api_ai_bot_status():
 async def api_ai_bot_toggle(enabled: bool):
     _ai_bot_state["enabled"] = enabled
     if enabled:
-        # Reset city list so it refreshes on next tick
+        # Reset city list and cooldowns so it re-evaluates all cities immediately
         _ai_bot_state["city_keys"] = []
-        _ai_bot_state["city_index"] = 0
+        _ai_bot_state["city_last_run"] = {}
     log.info("ai_bot_toggled", enabled=enabled)
     return {"enabled": _ai_bot_state["enabled"]}
 
@@ -3205,7 +3181,6 @@ async def api_gpt_bot_status():
     ).fetchone()[0]
     return {
         "enabled": _gpt_bot_state["enabled"],
-        "city_index": _gpt_bot_state["city_index"],
         "active_city_count": len(_gpt_bot_state["city_keys"]),
         "active_cities": _gpt_bot_state["city_keys"],
         "last_run_at": _gpt_bot_state["last_run_at"],
@@ -3223,7 +3198,7 @@ async def api_gpt_bot_toggle(enabled: bool):
     _gpt_bot_state["enabled"] = enabled
     if enabled:
         _gpt_bot_state["city_keys"] = []
-        _gpt_bot_state["city_index"] = 0
+        _gpt_bot_state["city_last_run"] = {}
     log.info("gpt_bot_toggled", enabled=enabled)
     return {"enabled": _gpt_bot_state["enabled"]}
 
@@ -3290,7 +3265,6 @@ async def api_gemini_bot_status():
     ).fetchone()[0]
     return {
         "enabled": _gemini_bot_state["enabled"],
-        "city_index": _gemini_bot_state["city_index"],
         "active_city_count": len(_gemini_bot_state["city_keys"]),
         "active_cities": _gemini_bot_state["city_keys"],
         "last_run_at": _gemini_bot_state["last_run_at"],
@@ -3308,7 +3282,7 @@ async def api_gemini_bot_toggle(enabled: bool):
     _gemini_bot_state["enabled"] = enabled
     if enabled:
         _gemini_bot_state["city_keys"] = []
-        _gemini_bot_state["city_index"] = 0
+        _gemini_bot_state["city_last_run"] = {}
     log.info("gemini_bot_toggled", enabled=enabled)
     return {"enabled": _gemini_bot_state["enabled"]}
 

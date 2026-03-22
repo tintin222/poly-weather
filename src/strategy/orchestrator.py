@@ -240,6 +240,12 @@ class Orchestrator:
         # Get current peak from hourly observations
         max_temp, peak_hour = compute_current_max(observations)
 
+        # Guard: if the observed max occurred before 8 AM it's almost certainly an
+        # overnight low, not the real daily high. Skip until meaningful data arrives.
+        if peak_hour < 8:
+            log.debug("peak_hour_gate_skip", city=city.key, peak_hour=peak_hour)
+            return
+
         # Upgrade to summary high if WU reports a higher official value
         daily_peak_row = self._weather_repo.get_daily_peak(city.key, today)
         summary_high = daily_peak_row["summary_high_temp"] if daily_peak_row else None
@@ -350,6 +356,10 @@ class Orchestrator:
             # impossible; our model isn't reliable enough to fight that signal,
             # and the huge share sizes (bet_size / ~0) create phantom positions.
             if price >= 0.97 or price < 0.01:
+                continue
+
+            # Guard: market consensus below 8% is too strong to bet YES against
+            if price < 0.08:
                 continue
 
             # Edge = confidence - market price

@@ -1728,6 +1728,9 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
             # Cap: don't buy YES when already priced >92¢ (almost no upside)
             if rec.action == "BUY_YES" and rec.price > 0.92:
                 continue
+            # Guard: market says <8% chance — too low to bet YES against
+            if rec.action == "BUY_YES" and rec.price < 0.08:
+                continue
             bet_size = _tiered_bet_size(rec.confidence, rec.price)
             if bet_size == 0.0:
                 continue
@@ -2435,6 +2438,10 @@ async def startup():
                 ).fetchone()
                 summary_high = peak_row["summary_high_temp"] if peak_row else None
 
+                # Guard: observed max before 8 AM is an overnight low, not the daily peak
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+
                 # WU forecast from cache
                 wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
@@ -2527,6 +2534,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
+                    if rec.action == "BUY_YES" and rec.price < 0.08:
+                        continue  # market says <8% chance; too low to bet YES against
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
@@ -2541,6 +2550,13 @@ async def startup():
                         (city_key, event_date, rec.bracket_label, rec.action),
                     ).fetchone()
                     if existing:
+                        continue
+                    # Cross-bot dedup: skip if any bot already holds the opposing side
+                    opposite_side = "BUY_NO" if rec.action == "BUY_YES" else "BUY_YES"
+                    if db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, opposite_side),
+                    ).fetchone():
                         continue
 
                     size = round(bet_size / rec.price, 2)
@@ -2680,6 +2696,10 @@ async def startup():
                     peak_row["peak_temp"] if peak_row else None
                 )
 
+                # Guard: observed max before 8 AM is an overnight low, not the daily peak
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+
                 wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
                 om_hourly: list[dict] = []
@@ -2765,6 +2785,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
+                    if rec.action == "BUY_YES" and rec.price < 0.08:
+                        continue  # market says <8% chance; too low to bet YES against
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
@@ -2779,6 +2801,13 @@ async def startup():
                         (city_key, event_date, rec.bracket_label, rec.action),
                     ).fetchone()
                     if existing:
+                        continue
+                    # Cross-bot dedup: skip if any bot already holds the opposing side
+                    opposite_side = "BUY_NO" if rec.action == "BUY_YES" else "BUY_YES"
+                    if db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, opposite_side),
+                    ).fetchone():
                         continue
 
                     size = round(bet_size / rec.price, 2)
@@ -2917,6 +2946,10 @@ async def startup():
                     peak_row["peak_temp"] if peak_row else None
                 )
 
+                # Guard: observed max before 8 AM is an overnight low, not the daily peak
+                if peak_row and peak_row["peak_hour"] < 8:
+                    continue
+
                 wu_forecast = _wu_forecast_cache.get(city_key, {}).get("data", [])
 
                 om_hourly: list[dict] = []
@@ -3002,6 +3035,8 @@ async def startup():
                         continue
                     if rec.action == "BUY_YES" and rec.price > 0.92:
                         continue
+                    if rec.action == "BUY_YES" and rec.price < 0.08:
+                        continue  # market says <8% chance; too low to bet YES against
                     if rec.action == "BUY_YES":
                         if yes_placed_this_run:
                             continue
@@ -3016,6 +3051,13 @@ async def startup():
                         (city_key, event_date, rec.bracket_label, rec.action),
                     ).fetchone()
                     if existing:
+                        continue
+                    # Cross-bot dedup: skip if any bot already holds the opposing side
+                    opposite_side = "BUY_NO" if rec.action == "BUY_YES" else "BUY_YES"
+                    if db.conn.execute(
+                        "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? LIMIT 1",
+                        (city_key, event_date, rec.bracket_label, opposite_side),
+                    ).fetchone():
                         continue
 
                     size = round(bet_size / rec.price, 2)

@@ -1386,15 +1386,35 @@ async def api_city_bets(city_key: str):
 
 @app.get("/api/city/{city_key}/market")
 async def api_city_market(city_key: str):
-    """Active Polymarket event + brackets + bets for a city."""
+    """Active Polymarket event + brackets + bets for a city.
+
+    Priority: today's active event > closest future active > most recent closed.
+    """
+    from src.weather.cities import get_city as _get_city
+    from src.utils.time_utils import today_in_tz
     db = get_db()
-    event = db.conn.execute(
-        """SELECT * FROM polymarket_events
-           WHERE city_key = ?
-           ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, date DESC
-           LIMIT 1""",
-        (city_key,),
-    ).fetchone()
+    city_obj = _get_city(city_key)
+    today = today_in_tz(city_obj.timezone) if city_obj else None
+
+    event = None
+    if today:
+        # 1. Today's active event
+        event = db.conn.execute(
+            "SELECT * FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date = ? LIMIT 1",
+            (city_key, today),
+        ).fetchone()
+    if not event:
+        # 2. Closest future active event
+        event = db.conn.execute(
+            "SELECT * FROM polymarket_events WHERE city_key = ? AND status = 'active' AND date >= ? ORDER BY date ASC LIMIT 1",
+            (city_key, today or ''),
+        ).fetchone()
+    if not event:
+        # 3. Most recent event (active or closed)
+        event = db.conn.execute(
+            "SELECT * FROM polymarket_events WHERE city_key = ? ORDER BY date DESC LIMIT 1",
+            (city_key,),
+        ).fetchone()
     if not event:
         return {"event": None, "brackets": [], "bets": []}
     brackets = db.conn.execute(

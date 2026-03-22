@@ -12,6 +12,7 @@ venv/
 .env
 
 # Database
+*.db
 data/*.db
 data/*.db-journal
 data/*.db-wal

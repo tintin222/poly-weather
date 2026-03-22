@@ -128,6 +128,24 @@ def _build_prompt(
     hist_block = "\n".join(hist_lines) if hist_lines else "  (no history)"
     summary_str = f"{summary_high}{U} — {summary_high_note}" if summary_high is not None else "not yet available"
 
+    # Compute observed max from wu_obs to surface explicitly — WU summary high often lags
+    obs_temps = [o.get("temperature") for o in wu_obs if o.get("temperature") is not None]
+    observed_max = max(obs_temps) if obs_temps else None
+    if observed_max is not None and summary_high is not None and observed_max > summary_high:
+        observed_max_note = f"⚠ OBSERVED MAX {observed_max}{U} already EXCEEDS the summary high ({summary_high}{U}). The summary high is stale — use the observed max as your temperature floor."
+    elif observed_max is not None:
+        observed_max_note = f"Observed max so far: {observed_max}{U} (consistent with or below summary high)"
+    else:
+        observed_max_note = "No observations yet today"
+
+    # Identify market leader (highest YES-priced bracket) for late-day warnings
+    market_leader_line = ""
+    if brackets:
+        leader = max(brackets, key=lambda b: float(b.get("yes_price") or 0))
+        leader_price = float(leader.get("yes_price") or 0)
+        if leader_price >= 0.60:
+            market_leader_line = f"\n⚠ MARKET LEADER: '{leader['label']}' is priced at {round(leader_price*100)}% YES. This is a very strong market consensus — override it only if you have concrete observed data (not just forecasts) directly contradicting it."
+
     return f"""You are a weather-temperature Polymarket bracket trading expert. Analyze multi-source weather data and recommend bracket trades.
 
 ## City: {city_name}
@@ -136,6 +154,9 @@ Day status: {day_status}
 
 ## WU Observed Temperatures (today, actual station readings)
 {wu_obs_block}
+
+## Key temperature summary
+{observed_max_note}
 
 ## WU Summary High (official daily high — Polymarket resolves against this value at day's end)
 {summary_str}
@@ -155,7 +176,7 @@ City avg peak hour: {avg_peak_hour:.1f}:00
 
 ## Polymarket Brackets & Current Prices
 {bracket_block}
-Note: Market prices reflect the collective probability estimate of all traders. Large divergence between your estimate and market pricing requires strong justification — the market often knows things you don't (e.g. forecast model updates, recent station data).
+Note: Market prices reflect the collective probability estimate of all traders. Large divergence between your estimate and market pricing requires strong justification — the market often knows things you don't (e.g. forecast model updates, recent station data).{market_leader_line}
 
 ---
 
@@ -166,9 +187,10 @@ Your task:
 
 Critical reasoning rules:
 - If day status is EARLY or NEAR PEAK: the WU summary high is NOT the final value. Forecasts showing higher temps are credible — use them. The current summary high is just a floor.
-- If day status is LATE: the WU summary high is likely final. Trust it heavily.
+- If day status is LATE: use the OBSERVED MAX as your temperature floor (not the summary high — it often lags real readings by 30–60 minutes). If the observed max exceeds the summary high, trust the observed max.
 - NEVER anchor your peak estimate purely on the current summary high when it's early in the day and forecasts show higher temps coming.
-- The market price is a strong prior. If you disagree with it by more than 20 percentage points, be very specific about WHY the market is wrong.
+- MARKET RESPECT: The market price is a very strong prior. If a bracket is priced ≥60%, treat it as highly credible. You may only bet YES on a different bracket if you have concrete observed temperatures (actual WU readings or METAR) — not just forecasts — that directly contradict the market.
+- In LATE day status: forecasts alone are NOT sufficient evidence to override a strongly-priced market bracket. Prefer SKIP over making contrarian bets based on forecasts.
 - BUY_YES only on the bracket you are genuinely confident will win AND the price gives real edge (your confidence substantially exceeds the market price).
 - BUY_NO on brackets clearly excluded by evidence (price > 0.03, meaning there's value to capture).
 - SKIP when evidence is ambiguous or your edge is small.

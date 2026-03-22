@@ -1199,6 +1199,66 @@ async def api_reset_paper_account():
     return {"status": "ok", "message": "All bets deleted. Balance reset."}
 
 
+_BOT_SETTINGS_DEFAULTS = {
+    "min_confidence": 0.75,
+    "max_bet_usd": 200.0,
+    "max_daily_exposure": 500.0,
+}
+
+
+def _load_bot_settings(conn, bot_name: str) -> dict:
+    """Return bot settings dict, inserting defaults if row missing."""
+    row = conn.execute("SELECT * FROM bot_settings WHERE bot_name = ?", (bot_name,)).fetchone()
+    if row:
+        return dict(row)
+    conn.execute(
+        "INSERT OR IGNORE INTO bot_settings (bot_name, min_confidence, max_bet_usd, max_daily_exposure, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (bot_name, _BOT_SETTINGS_DEFAULTS["min_confidence"], _BOT_SETTINGS_DEFAULTS["max_bet_usd"], _BOT_SETTINGS_DEFAULTS["max_daily_exposure"], int(time.time())),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM bot_settings WHERE bot_name = ?", (bot_name,)).fetchone())
+
+
+@app.get("/api/bot-settings")
+async def api_get_bot_settings():
+    """Get per-bot configuration settings for all 3 bots."""
+    db = get_db()
+    return {bot: _load_bot_settings(db.conn, bot) for bot in ("claude", "gpt", "gemini")}
+
+
+@app.post("/api/bot-settings/{bot_name}")
+async def api_set_bot_settings(
+    bot_name: str,
+    min_confidence: float | None = None,
+    max_bet_usd: float | None = None,
+    max_daily_exposure: float | None = None,
+):
+    """Upsert per-bot configuration settings."""
+    if bot_name not in ("claude", "gpt", "gemini"):
+        return {"error": f"Unknown bot: {bot_name}"}
+    db = get_db()
+    conn = db.conn
+    _load_bot_settings(conn, bot_name)  # ensure row exists
+    updates = []
+    params = []
+    if min_confidence is not None:
+        updates.append("min_confidence = ?")
+        params.append(min_confidence)
+    if max_bet_usd is not None:
+        updates.append("max_bet_usd = ?")
+        params.append(max_bet_usd)
+    if max_daily_exposure is not None:
+        updates.append("max_daily_exposure = ?")
+        params.append(max_daily_exposure)
+    if updates:
+        updates.append("updated_at = ?")
+        params.append(int(time.time()))
+        params.append(bot_name)
+        conn.execute(f"UPDATE bot_settings SET {', '.join(updates)} WHERE bot_name = ?", params)
+        conn.commit()
+    return {"status": "ok", "config": _load_bot_settings(conn, bot_name)}
+
+
 @app.get("/config", response_class=HTMLResponse)
 async def config_page(request: Request):
     """Config page for paper trading settings."""
@@ -2383,6 +2443,7 @@ async def startup():
             executed_count = 0
             yes_placed_this_run = False
             trader = PolymarketTrader(settings)
+            _claude_cfg = _load_bot_settings(db.conn, "claude")
             for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
@@ -2399,9 +2460,14 @@ async def startup():
                 if rec.action == "BUY_YES":
                     if yes_placed_this_run:
                         continue
+                # Per-bot min_confidence filter
+                if rec.confidence < _claude_cfg["min_confidence"]:
+                    continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
+                # Per-bot max bet cap
+                bet_size = min(bet_size, _claude_cfg["max_bet_usd"])
                 # Duplicate guard: skip if this bot already bet on this bracket+side today
                 existing = db.conn.execute(
                     "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'claude' LIMIT 1",
@@ -2412,6 +2478,13 @@ async def startup():
 
                 size = round(bet_size / rec.price, 2)
                 cost = round(rec.price * size, 2)
+                # Per-bot daily exposure cap
+                today_spent = db.conn.execute(
+                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'claude' AND date = ?",
+                    (event_date,),
+                ).fetchone()[0]
+                if today_spent + cost > _claude_cfg["max_daily_exposure"]:
+                    break
                 order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
                 db.conn.execute(
                     """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
@@ -2619,6 +2692,7 @@ async def startup():
             executed_count = 0
             yes_placed_this_run = False
             trader = PolymarketTrader(settings)
+            _gpt_cfg = _load_bot_settings(db.conn, "gpt")
             for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
@@ -2631,9 +2705,12 @@ async def startup():
                 if rec.action == "BUY_YES":
                     if yes_placed_this_run:
                         continue
+                if rec.confidence < _gpt_cfg["min_confidence"]:
+                    continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
+                bet_size = min(bet_size, _gpt_cfg["max_bet_usd"])
                 existing = db.conn.execute(
                     "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gpt' LIMIT 1",
                     (city_key, event_date, rec.bracket_label, rec.action),
@@ -2643,6 +2720,12 @@ async def startup():
 
                 size = round(bet_size / rec.price, 2)
                 cost = round(rec.price * size, 2)
+                today_spent = db.conn.execute(
+                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gpt' AND date = ?",
+                    (event_date,),
+                ).fetchone()[0]
+                if today_spent + cost > _gpt_cfg["max_daily_exposure"]:
+                    break
                 order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
                 db.conn.execute(
                     """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
@@ -2848,6 +2931,7 @@ async def startup():
             executed_count = 0
             yes_placed_this_run = False
             trader = PolymarketTrader(settings)
+            _gemini_cfg = _load_bot_settings(db.conn, "gemini")
             for rec in sorted(advice.recommendations, key=lambda r: r.confidence, reverse=True):
                 if rec.action == "SKIP" or not rec.token_id:
                     continue
@@ -2860,9 +2944,12 @@ async def startup():
                 if rec.action == "BUY_YES":
                     if yes_placed_this_run:
                         continue
+                if rec.confidence < _gemini_cfg["min_confidence"]:
+                    continue
                 bet_size = _tiered_bet_size(rec.confidence, rec.price)
                 if bet_size == 0.0:
                     continue
+                bet_size = min(bet_size, _gemini_cfg["max_bet_usd"])
                 existing = db.conn.execute(
                     "SELECT 1 FROM bets WHERE city_key = ? AND date = ? AND bracket_label = ? AND side = ? AND llm_source = 'gemini' LIMIT 1",
                     (city_key, event_date, rec.bracket_label, rec.action),
@@ -2872,6 +2959,12 @@ async def startup():
 
                 size = round(bet_size / rec.price, 2)
                 cost = round(rec.price * size, 2)
+                today_spent = db.conn.execute(
+                    "SELECT COALESCE(SUM(cost), 0) FROM bets WHERE llm_source = 'gemini' AND date = ?",
+                    (event_date,),
+                ).fetchone()[0]
+                if today_spent + cost > _gemini_cfg["max_daily_exposure"]:
+                    break
                 order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
                 db.conn.execute(
                     """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,

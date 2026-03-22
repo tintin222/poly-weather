@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS paper_account (
     updated_at      INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bot_settings (
+    bot_name           TEXT PRIMARY KEY,
+    min_confidence     REAL NOT NULL DEFAULT 0.75,
+    max_bet_usd        REAL NOT NULL DEFAULT 200.0,
+    max_daily_exposure REAL NOT NULL DEFAULT 500.0,
+    updated_at         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS job_runs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     job_type          TEXT NOT NULL,

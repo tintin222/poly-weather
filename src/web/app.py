@@ -614,12 +614,12 @@ async def bets_page(
 
     summary = conn.execute(f"""
         SELECT COUNT(*) as total_bets,
-               SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
-               SUM(CASE WHEN won=0 THEN 1 ELSE 0 END) as losses,
+               SUM(CASE WHEN won=1 OR (won=2 AND pnl>=0) THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN won=0 OR (won=2 AND pnl<0) THEN 1 ELSE 0 END) as losses,
                SUM(CASE WHEN won IS NULL THEN 1 ELSE 0 END) as pending,
                COALESCE(SUM(cost), 0) as total_staked,
-               COALESCE(SUM(CASE WHEN won=1 THEN (size-cost) ELSE 0 END), 0) as won_profit,
-               COALESCE(SUM(CASE WHEN won=0 THEN -cost ELSE 0 END), 0) as lost_cost,
+               COALESCE(SUM(CASE WHEN won=1 THEN (size-cost) WHEN won=2 AND pnl>=0 THEN pnl ELSE 0 END), 0) as won_profit,
+               COALESCE(SUM(CASE WHEN won=0 THEN -cost WHEN won=2 AND pnl<0 THEN pnl ELSE 0 END), 0) as lost_cost,
                COALESCE(SUM(pnl), 0) as net_pnl
         FROM bets b {where}
     """, params).fetchone()

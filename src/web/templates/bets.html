@@ -119,6 +119,9 @@
             <option value="claude"  {% if filter_bot == 'claude'  %}selected{% endif %}>Claude</option>
             <option value="gpt"     {% if filter_bot == 'gpt'     %}selected{% endif %}>GPT</option>
             <option value="gemini"  {% if filter_bot == 'gemini'  %}selected{% endif %}>Gemini</option>
+            <option value="claude+" {% if filter_bot == 'claude+' %}selected{% endif %}>Claude+</option>
+            <option value="gpt+"    {% if filter_bot == 'gpt+'    %}selected{% endif %}>GPT+</option>
+            <option value="gemini+" {% if filter_bot == 'gemini+' %}selected{% endif %}>Gemini+</option>
           </select>
         </div>
         <input type="hidden" name="sort" value="{{ sort }}">
@@ -252,6 +255,8 @@
                   <span class="px-1.5 py-0.5 rounded bg-term-purple/10 text-term-purple text-[10px]">gpt</span>
                 {% elif bet.llm_source == 'gemini' %}
                   <span class="px-1.5 py-0.5 rounded" style="background:rgba(52,211,153,0.1);color:#34d399;font-size:10px;padding:2px 6px;">gemini</span>
+                {% elif '+' in (bet.llm_source or '') %}
+                  <span class="px-1.5 py-0.5 rounded" style="background:rgba(254,176,25,0.1);color:#feb019;font-size:10px;padding:2px 6px;">{{ bet.llm_source }}</span>
                 {% else %}
                   <span class="text-term-muted text-[10px]">{{ bet.llm_source or '—' }}</span>
                 {% endif %}

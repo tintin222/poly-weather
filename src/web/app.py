@@ -24,6 +24,10 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 app = FastAPI(title="poly-weather", docs_url="/api/docs")
 
+# Enriched bots router (claude+, gpt+, gemini+ with extra weather sources)
+from src.web.enriched_bots import enriched_router, register_enriched_jobs
+app.include_router(enriched_router)
+
 # Database singleton - initialized on startup
 _db: Database | None = None
 
@@ -3597,6 +3601,8 @@ async def startup():
     _scheduler.add_job(_run_claude_no_bot, "interval", minutes=1, seconds=10, id="claude_no_bot")
     _scheduler.add_job(_run_gpt_no_bot, "interval", minutes=1, seconds=25, id="gpt_no_bot")
     _scheduler.add_job(_run_gemini_no_bot, "interval", minutes=1, seconds=50, id="gemini_no_bot")
+
+    register_enriched_jobs(_scheduler)
 
     _scheduler.start()
     log.info("scheduler_started")

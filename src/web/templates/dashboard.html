@@ -125,6 +125,13 @@
          class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gpt' %}bg-term-purple/10 text-term-purple border-term-purple/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">GPT</a>
       <a href="/?bot=gemini"
          class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gemini' %}bg-term-green/10 text-term-green border-term-green/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">Gemini</a>
+      <span class="text-term-muted">|</span>
+      <a href="/?bot=claude%2B"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'claude+' %}bg-term-amber/10 text-term-amber border-term-amber/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">Claude+</a>
+      <a href="/?bot=gpt%2B"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gpt+' %}bg-term-amber/10 text-term-amber border-term-amber/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">GPT+</a>
+      <a href="/?bot=gemini%2B"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gemini+' %}bg-term-amber/10 text-term-amber border-term-amber/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">Gemini+</a>
     </div>
 
     <!-- Summary Cards -->
@@ -237,6 +244,12 @@
                     <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-purple/10 text-term-purple border border-term-purple/20">gpt</span>
                   {% elif bet.llm_source == 'gemini' %}
                     <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-green/10 text-term-green border border-term-green/20">gemini</span>
+                  {% elif bet.llm_source in ['claude+', 'claude+-no'] %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-amber/10 text-term-amber border border-term-amber/20">{{ bet.llm_source }}</span>
+                  {% elif bet.llm_source in ['gpt+', 'gpt+-no'] %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-amber/10 text-term-amber border border-term-amber/20">{{ bet.llm_source }}</span>
+                  {% elif bet.llm_source in ['gemini+', 'gemini+-no'] %}
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-term-amber/10 text-term-amber border border-term-amber/20">{{ bet.llm_source }}</span>
                   {% else %}
                     <span class="text-term-muted text-[10px]">{{ bet.llm_source or '–' }}</span>
                   {% endif %}

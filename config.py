@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     gemini_api_key: str = ""
 
+    # Enriched weather sources
+    openweather_api_key: str = ""
+    weatherapi_api_key: str = ""
+
     # Logging
     log_level: str = "INFO"
 

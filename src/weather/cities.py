@@ -109,12 +109,6 @@ CITIES: dict[str, CityConfig] = {
         timezone="Asia/Tokyo",
         wu_station_id="RJTT", wu_url_path="jp/tokyo/RJTT",
     ),
-    "Hong Kong": CityConfig(
-        key="Hong Kong", display_name="Hong Kong",
-        lat=22.3080, lon=113.9185, unit="celsius",
-        timezone="Asia/Hong_Kong",
-        wu_station_id="VHHH", wu_url_path="hk/hong-kong/VHHH",
-    ),
     "Shanghai": CityConfig(
         key="Shanghai", display_name="Shanghai",
         lat=31.1443, lon=121.8083, unit="celsius",
@@ -163,8 +157,6 @@ _SLUG_ALIASES: dict[str, str] = {
     "são paulo": "Sao Paulo",
     "tel aviv": "Tel Aviv",
     "tel-aviv": "Tel Aviv",
-    "hong kong": "Hong Kong",
-    "hong-kong": "Hong Kong",
     "buenos aires": "Buenos Aires",
     "buenos-aires": "Buenos Aires",
 }

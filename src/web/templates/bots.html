@@ -247,6 +247,62 @@
       </div>
     </div>
 
+    <!-- ENRICHED AGENTS (6-source) -->
+    <div class="flex items-center gap-2 mt-4 mb-2">
+      <span class="text-term-amber font-display font-semibold text-xs">ENRICHED AGENTS (6-SOURCE)</span>
+      <span class="text-[10px] text-term-muted">all data + OpenWeather + WeatherAPI</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {% for ebot in [
+        {'id': 'claude-plus', 'label': 'Claude+', 'desc': 'claude-haiku + 6 sources'},
+        {'id': 'gpt-plus', 'label': 'GPT+', 'desc': 'gpt-5.4-mini + 6 sources'},
+        {'id': 'gemini-plus', 'label': 'Gemini+', 'desc': 'gemini-flash + 6 sources'}
+      ] %}
+      <div class="card rounded-lg p-4" style="border-color: rgba(254,176,25,0.15);">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div id="{{ ebot.id }}-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+            <span class="font-display font-semibold text-term-bright text-sm">{{ ebot.label }}</span>
+            <span id="{{ ebot.id }}-lbl" class="text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border">STOPPED</span>
+          </div>
+          <button id="{{ ebot.id }}-btn" onclick="toggleEnrichedBot('{{ ebot.id }}')"
+            class="btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green">Enable</button>
+        </div>
+        <div class="text-[10px] text-term-muted mb-3">{{ ebot.desc }} · 2 min/city</div>
+        <div class="space-y-0.5 text-[10px]">
+          <div class="text-term-muted">Last run: <span id="{{ ebot.id }}-lastrun" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Last city: <span id="{{ ebot.id }}-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Min bet hour: <span id="{{ ebot.id }}-peak" class="text-term-amber">–</span> · window <span id="{{ ebot.id }}-window" class="text-term-amber">–</span></div>
+          <div id="{{ ebot.id }}-err" class="hidden text-term-red">Error: <span id="{{ ebot.id }}-errtext"></span></div>
+        </div>
+      </div>
+      {% endfor %}
+      {% for ebot in [
+        {'id': 'claude-plus-no', 'label': 'Claude+ NO', 'desc': 'NO agent + 6 sources'},
+        {'id': 'gpt-plus-no', 'label': 'GPT+ NO', 'desc': 'NO agent + 6 sources'},
+        {'id': 'gemini-plus-no', 'label': 'Gemini+ NO', 'desc': 'NO agent + 6 sources'}
+      ] %}
+      <div class="card rounded-lg p-4" style="border-color: rgba(254,176,25,0.15);">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <div id="{{ ebot.id }}-dot" class="w-2.5 h-2.5 rounded-full bg-term-muted"></div>
+            <span class="font-display font-semibold text-term-bright text-sm">{{ ebot.label }}</span>
+            <span id="{{ ebot.id }}-lbl" class="text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border">STOPPED</span>
+          </div>
+          <button id="{{ ebot.id }}-btn" onclick="toggleEnrichedBot('{{ ebot.id }}')"
+            class="btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green">Enable</button>
+        </div>
+        <div class="text-[10px] text-term-muted mb-3">{{ ebot.desc }} · 2 min/city</div>
+        <div class="space-y-0.5 text-[10px]">
+          <div class="text-term-muted">Last run: <span id="{{ ebot.id }}-lastrun" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Last city: <span id="{{ ebot.id }}-lastcity" class="text-term-text">–</span></div>
+          <div class="text-term-muted">Min bet hour: <span id="{{ ebot.id }}-peak" class="text-term-amber">–</span> · window <span id="{{ ebot.id }}-window" class="text-term-amber">–</span></div>
+          <div id="{{ ebot.id }}-err" class="hidden text-term-red">Error: <span id="{{ ebot.id }}-errtext"></span></div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
     <!-- Tabbed Analysis Log -->
     <div class="card rounded-lg overflow-hidden">
       <div class="px-4 pt-3 pb-0 border-b border-term-border flex items-center justify-between">
@@ -526,10 +582,69 @@
       if (hint) hint.textContent = collapsed ? '▼ expand' : '▲ collapse';
     }
 
+    // --- Enriched bots ---
+    const enrichedBotState = {};
+    const ENRICHED_SLUGS = ['claude-plus', 'gpt-plus', 'gemini-plus', 'claude-plus-no', 'gpt-plus-no', 'gemini-plus-no'];
+    const ENRICHED_COLOR = '#feb019';
+
+    function updateEnrichedPanel(slug, s) {
+      enrichedBotState[slug] = s.enabled;
+      const dot = document.getElementById(`${slug}-dot`);
+      const lbl = document.getElementById(`${slug}-lbl`);
+      const btn = document.getElementById(`${slug}-btn`);
+      if (s.enabled) {
+        dot.className = 'w-2.5 h-2.5 rounded-full pulse-dot';
+        dot.style.background = ENRICHED_COLOR;
+        lbl.textContent = 'RUNNING';
+        lbl.style.cssText = `color:${ENRICHED_COLOR};border-color:${ENRICHED_COLOR}44;background:${ENRICHED_COLOR}18`;
+        btn.textContent = 'Disable';
+        btn.className = 'btn px-3 py-1 rounded text-[10px] font-semibold border border-term-red/30 bg-term-red/10 text-term-red';
+      } else {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-term-muted';
+        dot.style.background = '';
+        lbl.textContent = 'STOPPED';
+        lbl.style.cssText = '';
+        lbl.className = 'text-[10px] text-term-muted px-1.5 py-0.5 rounded border border-term-border';
+        btn.textContent = 'Enable';
+        btn.className = 'btn px-3 py-1 rounded text-[10px] font-semibold border border-term-green/30 bg-term-green/10 text-term-green';
+      }
+      document.getElementById(`${slug}-lastrun`).textContent = timeSince(s.last_run_at);
+      document.getElementById(`${slug}-lastcity`).textContent = s.last_city || '–';
+      document.getElementById(`${slug}-peak`).textContent = s.last_min_bet_hour != null ? `${s.last_min_bet_hour}:00` : '–';
+      document.getElementById(`${slug}-window`).textContent = s.last_window || '–';
+      const errEl = document.getElementById(`${slug}-err`);
+      if (s.last_error) {
+        errEl.classList.remove('hidden');
+        document.getElementById(`${slug}-errtext`).textContent = s.last_error;
+      } else { errEl.classList.add('hidden'); }
+    }
+
+    async function loadEnrichedStatus() {
+      try {
+        const res = await fetch('/api/enriched-bots/status');
+        const all = await res.json();
+        const nameToSlug = {'claude+':'claude-plus','gpt+':'gpt-plus','gemini+':'gemini-plus',
+                            'claude+-no':'claude-plus-no','gpt+-no':'gpt-plus-no','gemini+-no':'gemini-plus-no'};
+        for (const [name, s] of Object.entries(all)) {
+          const slug = nameToSlug[name];
+          if (slug) updateEnrichedPanel(slug, s);
+        }
+      } catch(e) { console.error('enriched status failed', e); }
+    }
+
+    async function toggleEnrichedBot(slug) {
+      const newState = !enrichedBotState[slug];
+      try {
+        await fetch(`/api/enriched-bots/${slug}/toggle?enabled=${newState}`, { method: 'POST' });
+        await loadEnrichedStatus();
+      } catch(e) { console.error(`toggle enriched ${slug} failed`, e); }
+    }
+
     // Init
     loadAllStatus();
+    loadEnrichedStatus();
     loadLog();
-    setInterval(() => { loadAllStatus(); loadLog(); }, 30000);
+    setInterval(() => { loadAllStatus(); loadEnrichedStatus(); loadLog(); }, 30000);
   </script>
 </body>
 </html>

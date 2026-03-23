@@ -369,10 +369,12 @@ async def dashboard(request: Request, bot: str = ""):
         f"SELECT COUNT(*) as cnt FROM bets WHERE is_paper = 1 {bot_filter}", bot_params
     ).fetchone()["cnt"]
     won_bets = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM bets WHERE won = 1 {bot_filter}", bot_params
+        f"SELECT COUNT(*) as cnt FROM bets WHERE (won = 1 OR (won = 2 AND pnl >= 0)) {bot_filter}",
+        bot_params,
     ).fetchone()["cnt"]
     lost_bets = conn.execute(
-        f"SELECT COUNT(*) as cnt FROM bets WHERE won = 0 {bot_filter}", bot_params
+        f"SELECT COUNT(*) as cnt FROM bets WHERE (won = 0 OR (won = 2 AND pnl < 0)) {bot_filter}",
+        bot_params,
     ).fetchone()["cnt"]
     pending_bets = conn.execute(
         f"SELECT COUNT(*) as cnt FROM bets WHERE won IS NULL {bot_filter}", bot_params
@@ -1221,8 +1223,12 @@ async def api_paper_account():
 
     # Stats
     total_bets = conn.execute("SELECT COUNT(*) as v FROM bets").fetchone()["v"]
-    won = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won = 1").fetchone()["v"]
-    lost = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won = 0").fetchone()["v"]
+    won = conn.execute(
+        "SELECT COUNT(*) as v FROM bets WHERE won = 1 OR (won = 2 AND pnl >= 0)"
+    ).fetchone()["v"]
+    lost = conn.execute(
+        "SELECT COUNT(*) as v FROM bets WHERE won = 0 OR (won = 2 AND pnl < 0)"
+    ).fetchone()["v"]
     pending = conn.execute("SELECT COUNT(*) as v FROM bets WHERE won IS NULL").fetchone()["v"]
 
     # Recent bets
@@ -1234,17 +1240,22 @@ async def api_paper_account():
     """).fetchall()
 
     # Per-bot breakdown
-    per_bot_rows = conn.execute("""
+    per_bot_raw = conn.execute("""
         SELECT llm_source,
                COUNT(*) as total_bets,
-               SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
-               SUM(CASE WHEN won=0 THEN 1 ELSE 0 END) as losses,
+               SUM(CASE WHEN won=1 OR (won=2 AND pnl>=0) THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN won=0 OR (won=2 AND pnl<0) THEN 1 ELSE 0 END) as losses,
                SUM(CASE WHEN won IS NULL THEN 1 ELSE 0 END) as pending_bets,
-               COALESCE(SUM(pnl), 0) as total_pnl,
-               COALESCE(AVG(CASE WHEN won IS NOT NULL THEN CAST(won AS REAL) END), 0) as win_rate
+               COALESCE(SUM(pnl), 0) as total_pnl
         FROM bets WHERE is_paper = 1
         GROUP BY llm_source
     """).fetchall()
+    per_bot_rows = []
+    for r in per_bot_raw:
+        d = dict(r)
+        resolved = d["wins"] + d["losses"]
+        d["win_rate"] = round(d["wins"] / resolved, 4) if resolved > 0 else 0
+        per_bot_rows.append(d)
 
     return {
         "config": {
@@ -1269,7 +1280,7 @@ async def api_paper_account():
             "pending": pending,
             "win_rate": round(won / (won + lost) * 100, 1) if (won + lost) > 0 else 0,
         },
-        "per_bot": [dict(r) for r in per_bot_rows],
+        "per_bot": per_bot_rows,
         "bets": [dict(r) for r in recent],
     }
 
@@ -3984,11 +3995,10 @@ async def api_pnl_comparison():
         SELECT llm_source,
                COUNT(*) as total_bets,
                COALESCE(SUM(cost), 0) as total_cost,
-               SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) as wins,
-               SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) as losses,
+               SUM(CASE WHEN won = 1 OR (won = 2 AND pnl >= 0) THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN won = 0 OR (won = 2 AND pnl < 0) THEN 1 ELSE 0 END) as losses,
                SUM(CASE WHEN won IS NULL THEN 1 ELSE 0 END) as pending,
-               COALESCE(SUM(pnl), 0) as total_pnl,
-               COALESCE(AVG(CASE WHEN won IS NOT NULL THEN won END), 0) as win_rate
+               COALESCE(SUM(pnl), 0) as total_pnl
         FROM bets WHERE is_paper = 1
         GROUP BY llm_source
     """).fetchall()
@@ -4000,8 +4010,14 @@ async def api_pnl_comparison():
         FROM bets WHERE is_paper = 1
         GROUP BY llm_source, date ORDER BY date DESC
     """).fetchall()
+    summary_out = []
+    for r in summary:
+        d = dict(r)
+        resolved = d["wins"] + d["losses"]
+        d["win_rate"] = round(d["wins"] / resolved, 4) if resolved > 0 else 0
+        summary_out.append(d)
     return {
-        "summary": [dict(r) for r in summary],
+        "summary": summary_out,
         "daily": [dict(r) for r in daily],
     }
 

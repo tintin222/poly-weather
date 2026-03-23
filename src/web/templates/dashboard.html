@@ -114,6 +114,19 @@
 
   <main class="p-4 max-w-[1600px] mx-auto space-y-4">
 
+    <!-- Bot Filter -->
+    <div class="flex items-center gap-2 animate-in" style="animation-delay:0.02s">
+      <span class="text-[10px] text-term-muted uppercase tracking-wider">Bot:</span>
+      <a href="/"
+         class="px-2 py-1 rounded text-[10px] border {% if not filter_bot %}bg-term-cyan/10 text-term-cyan border-term-cyan/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">All</a>
+      <a href="/?bot=claude"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'claude' %}bg-term-cyan/10 text-term-cyan border-term-cyan/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">Claude</a>
+      <a href="/?bot=gpt"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gpt' %}bg-term-purple/10 text-term-purple border-term-purple/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">GPT</a>
+      <a href="/?bot=gemini"
+         class="px-2 py-1 rounded text-[10px] border {% if filter_bot == 'gemini' %}bg-term-green/10 text-term-green border-term-green/20{% else %}text-term-muted border-term-border hover:text-term-text{% endif %}">Gemini</a>
+    </div>
+
     <!-- Summary Cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 animate-in" style="animation-delay:0.05s">
 

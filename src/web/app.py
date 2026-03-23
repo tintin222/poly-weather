@@ -352,33 +352,41 @@ async def _run_forecast_job(city_key: str, city) -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
+async def dashboard(request: Request, bot: str = ""):
     db = get_db()
     conn = db.conn
 
+    # Bot filter
+    bot_filter = "AND llm_source = ?" if bot else ""
+    bot_filter_b = "AND b.llm_source = ?" if bot else ""
+    bot_params: list = [bot] if bot else []
+
     # Summary stats
-    total_bets = conn.execute("SELECT COUNT(*) as cnt FROM bets").fetchone()["cnt"]
+    total_bets = conn.execute(
+        f"SELECT COUNT(*) as cnt FROM bets WHERE 1=1 {bot_filter}", bot_params
+    ).fetchone()["cnt"]
     paper_bets = conn.execute(
-        "SELECT COUNT(*) as cnt FROM bets WHERE is_paper = 1"
+        f"SELECT COUNT(*) as cnt FROM bets WHERE is_paper = 1 {bot_filter}", bot_params
     ).fetchone()["cnt"]
     won_bets = conn.execute(
-        "SELECT COUNT(*) as cnt FROM bets WHERE won = 1"
+        f"SELECT COUNT(*) as cnt FROM bets WHERE won = 1 {bot_filter}", bot_params
     ).fetchone()["cnt"]
     lost_bets = conn.execute(
-        "SELECT COUNT(*) as cnt FROM bets WHERE won = 0"
+        f"SELECT COUNT(*) as cnt FROM bets WHERE won = 0 {bot_filter}", bot_params
     ).fetchone()["cnt"]
     pending_bets = conn.execute(
-        "SELECT COUNT(*) as cnt FROM bets WHERE won IS NULL"
+        f"SELECT COUNT(*) as cnt FROM bets WHERE won IS NULL {bot_filter}", bot_params
     ).fetchone()["cnt"]
     total_pnl = conn.execute(
-        "SELECT COALESCE(SUM(pnl), 0) as total FROM bets WHERE pnl IS NOT NULL"
+        f"SELECT COALESCE(SUM(pnl), 0) as total FROM bets WHERE pnl IS NOT NULL {bot_filter}",
+        bot_params,
     ).fetchone()["total"]
     total_cost = conn.execute(
-        "SELECT COALESCE(SUM(cost), 0) as total FROM bets"
+        f"SELECT COALESCE(SUM(cost), 0) as total FROM bets WHERE 1=1 {bot_filter}", bot_params
     ).fetchone()["total"]
 
     # Recent bets — include placed time and profit-if-win
-    recent_bets = conn.execute("""
+    recent_bets = conn.execute(f"""
         SELECT b.*,
                e.title as event_title,
                e.slug as event_slug,
@@ -386,9 +394,10 @@ async def dashboard(request: Request):
                (b.size - b.cost) as profit_if_win
         FROM bets b
         LEFT JOIN polymarket_events e ON b.event_id = e.event_id
+        WHERE 1=1 {bot_filter_b}
         ORDER BY b.created_at DESC
         LIMIT 50
-    """).fetchall()
+    """, bot_params).fetchall()
 
     # Today's watch: active markets merged with today's peaks and our latest bet per city
     from src.utils.time_utils import today_in_tz
@@ -424,7 +433,7 @@ async def dashboard(request: Request):
     """, (today,)).fetchall()
 
     # Daily P&L summary
-    daily_pnl = conn.execute("""
+    daily_pnl = conn.execute(f"""
         SELECT date,
                COUNT(*) as bet_count,
                SUM(cost) as total_cost,
@@ -432,10 +441,11 @@ async def dashboard(request: Request):
                SUM(CASE WHEN won = 0 THEN -cost ELSE 0 END) as loss,
                COALESCE(SUM(pnl), 0) as net_pnl
         FROM bets
+        WHERE 1=1 {bot_filter}
         GROUP BY date
         ORDER BY date DESC
         LIMIT 30
-    """).fetchall()
+    """, bot_params).fetchall()
 
     # Weather data stats
     observation_count = conn.execute(
@@ -476,6 +486,7 @@ async def dashboard(request: Request):
         "peak_count": peak_count,
         "cities_with_data": cities_with_data,
         "now": int(time.time()),
+        "filter_bot": bot,
     })
 
 

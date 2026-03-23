@@ -50,7 +50,7 @@ _wu_forecast_cache: dict[str, dict] = {}
 
 # AI bot state — persists only for this process lifetime (off by default)
 _ai_bot_state: dict = {
-    "enabled": True,
+    "enabled": False,
     "city_keys": [],        # active cities with today's event (refreshed each tick)
     "city_last_run": {},    # {city_key: float} — last analysis timestamp per city
     "last_run_at": 0.0,
@@ -86,7 +86,7 @@ _gemini_bot_state: dict = {
 
 # NO agent state dicts
 _claude_no_state: dict = {
-    "enabled": True, "city_keys": [], "city_last_run": {},
+    "enabled": False, "city_keys": [], "city_last_run": {},
     "last_run_at": 0.0, "last_city": None, "last_error": None,
     "last_min_bet_hour": None, "last_window": None,
 }

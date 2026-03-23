@@ -37,10 +37,10 @@ def _make_state() -> dict:
     }
 
 _enriched_states: dict[str, dict] = {
-    "claude+": _make_state(),
+    "claude+": {**_make_state(), "enabled": False},
     "gpt+": _make_state(),
     "gemini+": _make_state(),
-    "claude+-no": _make_state(),
+    "claude+-no": {**_make_state(), "enabled": False},
     "gpt+-no": _make_state(),
     "gemini+-no": _make_state(),
 }

@@ -19,6 +19,10 @@ log = get_logger(__name__)
 
 _MODEL = "gemini-3.1-flash-lite-preview"
 
+_GEMINI_INSTRUCTIONS = """\
+- When holding a position, prefer holding over switching unless observed temperatures \
+clearly rule out your current bracket."""
+
 
 async def analyze(
     api_key: str,
@@ -54,6 +58,7 @@ async def analyze(
         historical_context=historical_context,
         min_bet_hour=min_bet_hour,
         current_position=current_position,
+        model_instructions=_GEMINI_INSTRUCTIONS,
     )
 
     client = genai.Client(api_key=api_key)

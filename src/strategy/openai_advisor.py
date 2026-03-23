@@ -19,6 +19,11 @@ log = get_logger(__name__)
 
 _MODEL = "gpt-5.4-mini-2026-03-17"
 
+_GPT_INSTRUCTIONS = """\
+- When holding a position, only switch if observed data strongly contradicts your current \
+bracket. Adjacent bracket switches require extra caution — the switching cost often \
+exceeds the expected gain."""
+
 
 async def analyze(
     api_key: str,
@@ -53,6 +58,7 @@ async def analyze(
         historical_context=historical_context,
         min_bet_hour=min_bet_hour,
         current_position=current_position,
+        model_instructions=_GPT_INSTRUCTIONS,
     )
 
     client = openai.AsyncOpenAI(api_key=api_key)

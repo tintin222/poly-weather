@@ -39,6 +39,15 @@ class LLMAdvice:
     raw_json: dict
 
 
+_CLAUDE_INSTRUCTIONS = """\
+- HOLD BIAS: If you already hold a YES position, default to SKIP unless your current bracket \
+is clearly impossible based on OBSERVED temperatures. Forecasts alone are NOT sufficient \
+reason to switch.
+- NEIGHBORING BRACKET RULE: Do NOT switch to an adjacent bracket (e.g. 40-41 to 42-43) \
+unless observed temps have already exceeded your current bracket's upper bound.
+- When in doubt between switching and holding, ALWAYS hold."""
+
+
 def _build_prompt(
     city_name: str,
     unit: str,
@@ -53,6 +62,7 @@ def _build_prompt(
     historical_context: list[dict],
     min_bet_hour: int,
     current_position: dict | None = None,
+    model_instructions: str = "",
 ) -> str:
     unit_label = "°F" if unit == "fahrenheit" else "°C"
     U = unit_label
@@ -215,7 +225,10 @@ Critical reasoning rules:
 - BUY_YES only on the bracket you are genuinely confident will win AND the price gives real edge.
 - BUY_NO on brackets clearly excluded by evidence (price > 0.03, meaning there's value to capture).
 - SKIP when evidence is ambiguous or your edge is small.
-
+{"" if not model_instructions else f"""
+Model-specific instructions:
+{model_instructions}
+"""}
 Respond ONLY with this JSON:
 {{
   "analysis": "3-5 sentence narrative: current situation, what the forecasts say, whether the day is early/late, and why you chose your estimate",
@@ -268,6 +281,7 @@ async def analyze(
         historical_context=historical_context,
         min_bet_hour=min_bet_hour,
         current_position=current_position,
+        model_instructions=_CLAUDE_INSTRUCTIONS,
     )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)

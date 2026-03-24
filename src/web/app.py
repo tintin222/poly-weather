@@ -2491,6 +2491,8 @@ async def startup():
         if not active_keys:
             return
 
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             # Per-city cooldown: skip if analyzed within the last 5 minutes
             if now - _ai_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
@@ -2757,6 +2759,8 @@ async def startup():
         if not active_keys:
             return
 
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             if now - _gpt_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
                 continue
@@ -3010,6 +3014,8 @@ async def startup():
         if not active_keys:
             return
 
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             if now - _gemini_bot_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
                 continue
@@ -3264,6 +3270,8 @@ async def startup():
         if not active_keys:
             return
 
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             if now - _claude_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
                 continue
@@ -3418,6 +3426,8 @@ async def startup():
         _gpt_no_state["city_keys"] = active_keys
         if not active_keys:
             return
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             if now - _gpt_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
                 continue
@@ -3536,6 +3546,8 @@ async def startup():
         _gemini_no_state["city_keys"] = active_keys
         if not active_keys:
             return
+        import random
+        random.shuffle(active_keys)
         for city_key in active_keys:
             if now - _gemini_no_state["city_last_run"].get(city_key, 0) < _COOLDOWN:
                 continue

@@ -169,6 +169,8 @@ async def _enriched_yes_tick(
     if not active_keys:
         return
 
+    import random
+    random.shuffle(active_keys)
     for city_key in active_keys:
         if now - state["city_last_run"].get(city_key, 0) < _COOLDOWN:
             continue
@@ -392,6 +394,8 @@ async def _enriched_no_tick(
     if not active_keys:
         return
 
+    import random
+    random.shuffle(active_keys)
     for city_key in active_keys:
         if now - state["city_last_run"].get(city_key, 0) < _COOLDOWN:
             continue

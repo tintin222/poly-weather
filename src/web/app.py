@@ -916,10 +916,11 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
             scraper = WUScraper(headless=True)
             await scraper.start()
             try:
-                observations = await scraper.scrape_daily(city, scrape_date)
+                result = await scraper.scrape_daily(city, scrape_date)
             finally:
                 await scraper.stop()
 
+            observations = result.observations if result else []
             if observations:
                 obs_dicts = [obs.to_dict() for obs in observations]
                 count = repo.upsert_hourly_observations_batch(city.key, scrape_date, obs_dicts)
@@ -929,6 +930,7 @@ async def _run_scrape_job(job_id: str, city, date: str | None):
                     city_key=city.key, date=scrape_date,
                     peak_temp=peak_obs.temperature, peak_hour=peak_obs.hour,
                     observation_count=len(observations),
+                    summary_high_temp=result.summary_high_temp,
                 )
                 job_repo.finish_run(run_id, "success", records_processed=count)
                 _jobs[job_id] = {

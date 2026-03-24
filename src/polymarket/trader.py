@@ -84,20 +84,16 @@ class PolymarketTrader:
 
         try:
             from py_clob_client.order_builder.constants import BUY
+            from py_clob_client.clob_types import OrderArgs
 
-            order_args = {
-                "token_id": token_id,
-                "price": price,
-                "size": size,
-                "side": BUY,
-            }
-            if tick_size:
-                order_args["tick_size"] = tick_size
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=BUY,
+            )
 
-            if neg_risk:
-                signed_order = self._clob_client.create_and_post_order(order_args)
-            else:
-                signed_order = self._clob_client.create_and_post_order(order_args)
+            signed_order = self._clob_client.create_and_post_order(order_args)
 
             order_id = ""
             status = "UNKNOWN"
@@ -156,15 +152,14 @@ class PolymarketTrader:
 
         try:
             from py_clob_client.order_builder.constants import SELL
+            from py_clob_client.clob_types import OrderArgs
 
-            order_args = {
-                "token_id": token_id,
-                "price": price,
-                "size": size,
-                "side": SELL,
-            }
-            if tick_size:
-                order_args["tick_size"] = tick_size
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=SELL,
+            )
 
             signed_order = self._clob_client.create_and_post_order(order_args)
 

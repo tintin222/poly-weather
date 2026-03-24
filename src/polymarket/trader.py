@@ -83,12 +83,17 @@ class PolymarketTrader:
         try:
             from py_clob_client.order_builder.constants import BUY
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
+            import math
 
-            amount = round(price * size, 2)  # USDC to spend
+            # Round price to 2 decimals, size to 4 decimals (Polymarket precision limits)
+            clean_price = round(price, 2)
+            clean_size = math.floor(size * 10000) / 10000
+            amount = round(clean_price * clean_size, 2)  # USDC to spend
 
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
+                price=clean_price,
                 side=BUY,
                 order_type=OrderType.FOK,
             )
@@ -123,12 +128,17 @@ class PolymarketTrader:
         try:
             from py_clob_client.order_builder.constants import SELL
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
+            import math
 
-            amount = round(price * size, 2)  # USDC value of shares to sell
+            # Round price to 2 decimals, size to 4 decimals (Polymarket precision limits)
+            clean_price = round(price, 2)
+            clean_size = math.floor(size * 10000) / 10000
+            amount = round(clean_price * clean_size, 2)
 
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
+                price=clean_price,
                 side=SELL,
                 order_type=OrderType.FOK,
             )

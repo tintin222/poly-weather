@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # Trading
     paper_mode: bool = True
+    test_mode: bool = False  # When True, caps all bets at $1 and daily exposure at $10
     initial_balance: float = 1000.0     # Paper trading starting balance
     bet_size: float = 10.0              # Fixed bet amount per trade
     max_daily_exposure: float = 200.0   # Max total bets per day

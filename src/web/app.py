@@ -3604,6 +3604,14 @@ async def startup():
 
     register_enriched_jobs(_scheduler)
 
+    # Test mode: cap all bets at $1, daily exposure at $10
+    from config import settings as _cfg
+    if _cfg.test_mode:
+        db = get_db()
+        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 1.0, max_daily_exposure = 10.0")
+        db.conn.commit()
+        log.info("test_mode_active", msg="All bot_settings capped to $1 bet / $10 daily")
+
     _scheduler.start()
     log.info("scheduler_started")
 

@@ -289,6 +289,10 @@ async def _enriched_yes_tick(
                     break
 
                 order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                if not order.success:
+                    log.warning("ENRICHED_YES_ORDER_FAILED", bot=bot_name, city=city_key,
+                                bracket=rec.bracket_label, error=order.error_msg)
+                    continue
                 db.conn.execute(
                     """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                        side, token_id, price, size, cost, order_id, order_status,
@@ -463,6 +467,10 @@ async def _enriched_no_tick(
                     break
 
                 order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                if not order.success:
+                    log.warning("ENRICHED_NO_ORDER_FAILED", bot=bot_name, city=city_key,
+                                bracket=rec.bracket_label, error=order.error_msg)
+                    continue
                 db.conn.execute(
                     """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                        side, token_id, price, size, cost, order_id, order_status,

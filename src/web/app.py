@@ -1830,6 +1830,9 @@ async def api_city_llm_analyze(city_key: str, execute: bool = False):
                 price=rec.price,
                 size=size,
             )
+            if not order.success:
+                log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                continue
             db.conn.execute(
                 """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                    side, token_id, price, size, cost, order_id, order_status,
@@ -2655,6 +2658,10 @@ async def startup():
                     if today_spent + cost > _claude_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label,
+                                    error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,
@@ -2903,6 +2910,9 @@ async def startup():
                     if today_spent + cost > _gpt_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,
@@ -3150,6 +3160,9 @@ async def startup():
                     if today_spent + cost > _gemini_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,
@@ -3347,6 +3360,9 @@ async def startup():
                     if today_spent + cost > _no_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,
@@ -3470,6 +3486,9 @@ async def startup():
                     if today_spent + cost > _no_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,
@@ -3585,6 +3604,9 @@ async def startup():
                     if today_spent + cost > _no_cfg["max_daily_exposure"]:
                         break
                     order = trader.place_limit_buy(token_id=rec.token_id, price=rec.price, size=size)
+                    if not order.success:
+                        log.warning("ORDER_FAILED", city=city_key, bracket=rec.bracket_label, error=order.error_msg)
+                        continue
                     db.conn.execute(
                         """INSERT INTO bets (event_id, bracket_id, city_key, date, bracket_label,
                            side, token_id, price, size, cost, order_id, order_status,

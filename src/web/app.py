@@ -63,7 +63,7 @@ _ai_bot_state: dict = {
 }
 
 _gpt_bot_state: dict = {
-    "enabled": True,
+    "enabled": False,
     "city_keys": [],
     "city_last_run": {},
     "last_run_at": 0.0,
@@ -91,7 +91,7 @@ _claude_no_state: dict = {
     "last_min_bet_hour": None, "last_window": None,
 }
 _gpt_no_state: dict = {
-    "enabled": True, "city_keys": [], "city_last_run": {},
+    "enabled": False, "city_keys": [], "city_last_run": {},
     "last_run_at": 0.0, "last_city": None, "last_error": None,
     "last_min_bet_hour": None, "last_window": None,
 }

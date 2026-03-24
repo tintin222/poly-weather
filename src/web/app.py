@@ -3608,9 +3608,9 @@ async def startup():
     from config import settings as _cfg
     if _cfg.test_mode:
         db = get_db()
-        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 1.0, max_daily_exposure = 10.0")
+        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 5.0, max_daily_exposure = 50.0")
         db.conn.commit()
-        log.info("test_mode_active", msg="All bot_settings capped to $1 bet / $10 daily")
+        log.info("test_mode_active", msg="All bot_settings capped to $5 bet / $50 daily")
 
     _scheduler.start()
     log.info("scheduler_started")

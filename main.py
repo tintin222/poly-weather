@@ -42,6 +42,10 @@ def run_bot_loop():
 def main():
     setup_logging(settings.log_level)
 
+    # Suppress noisy APScheduler job execution logs
+    import logging
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+
     # Optionally start the automated bot loop in a daemon thread
     if settings.bot_auto_start and settings.orchestrator_enabled:
         bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")

@@ -53,6 +53,37 @@ class PolymarketTrader:
             log.error("clob_client_init_error", error=str(exc))
             raise
 
+    def _get_book_price(self, token_id: str, side: str) -> tuple[float, str]:
+        """Get the best price from the order book and the market's tick size.
+
+        For BUY: returns best ask (lowest sell offer) — we match it to fill instantly.
+        For SELL: returns best bid (highest buy offer).
+        Returns (price, tick_size_str).
+        """
+        book = self._clob_client.get_order_book(token_id)
+        tick = book.tick_size or "0.01"
+
+        if side == "BUY":
+            if book.asks:
+                return float(book.asks[0].price), tick
+        else:
+            if book.bids:
+                return float(book.bids[0].price), tick
+
+        return 0.0, tick
+
+    def _round_for_tick(self, price: float, size: float, tick_size: str) -> tuple[float, float]:
+        """Round price and size to the precision required by the market's tick size."""
+        import math
+        # tick_size determines price precision: "0.01" → 2 decimals, "0.001" → 3 decimals
+        price_decimals = len(tick_size.split(".")[-1]) if "." in tick_size else 2
+        clean_price = round(price, price_decimals)
+        # Size: floor to (price_decimals + 2) decimals to stay within maker amount limits
+        size_decimals = price_decimals + 2
+        factor = 10 ** size_decimals
+        clean_size = math.floor(size * factor) / factor
+        return clean_price, clean_size
+
     def place_limit_buy(
         self,
         token_id: str,
@@ -61,51 +92,49 @@ class PolymarketTrader:
         tick_size: str = "0.01",
         neg_risk: bool = False,
     ) -> OrderResult:
-        """Place a market buy order (FOK — fill-or-kill at current price).
+        """Place a limit buy order at the best available ask price for instant fill.
 
-        Args:
-            token_id: The CLOB token ID to buy.
-            price: Price per share (used for cost calculation).
-            size: Number of shares to buy.
-
-        Returns:
-            OrderResult with order details.
+        Fetches the order book to get the real best ask and tick size,
+        then places a limit order with properly rounded price/size.
         """
         if self._paper_mode:
             return self._paper_trade(token_id, price, size, "BUY")
 
         if self._clob_client is None:
-            return OrderResult(
-                success=False,
-                error_msg="CLOB client not initialized",
-            )
+            return OrderResult(success=False, error_msg="CLOB client not initialized")
 
         try:
             from py_clob_client.order_builder.constants import BUY
-            from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            import math
+            from py_clob_client.clob_types import OrderArgs
 
-            # Use clean dollar amount and let CLOB resolve the price from order book
-            amount = math.floor(price * size * 100) / 100  # floor to 2 decimals
+            # Get best ask price and tick size from order book
+            book_price, market_tick = self._get_book_price(token_id, "BUY")
+            if book_price <= 0:
+                return OrderResult(success=False, error_msg="No asks in order book")
 
-            order_args = MarketOrderArgs(
+            # Use the book price (what sellers are offering)
+            use_price = book_price
+            use_size = size
+
+            # Round to market precision
+            clean_price, clean_size = self._round_for_tick(use_price, use_size, market_tick)
+            if clean_size < 5:
+                # Polymarket minimum is 5 shares — adjust size up
+                clean_size = 5.0
+
+            order_args = OrderArgs(
                 token_id=token_id,
-                amount=amount,
+                price=clean_price,
+                size=clean_size,
                 side=BUY,
-                order_type=OrderType.FOK,
             )
 
-            signed_order = self._clob_client.create_market_order(order_args)
-            resp = self._clob_client.post_order(signed_order)
-
-            return self._parse_order_response(resp, token_id, price, size, "order_placed")
+            signed_order = self._clob_client.create_and_post_order(order_args)
+            return self._parse_order_response(signed_order, token_id, clean_price, clean_size, "order_placed")
 
         except Exception as exc:  # noqa: BLE001
             log.error("order_error", token_id=token_id[:16], price=price, size=size, error=str(exc))
-            return OrderResult(
-                success=False,
-                error_msg=str(exc),
-            )
+            return OrderResult(success=False, error_msg=str(exc))
 
     def place_limit_sell(
         self,
@@ -115,7 +144,7 @@ class PolymarketTrader:
         tick_size: str = "0.01",
         neg_risk: bool = False,
     ) -> OrderResult:
-        """Place a market sell order (FOK — fill-or-kill at current price)."""
+        """Place a limit sell order at the best available bid price for instant fill."""
         if self._paper_mode:
             return self._paper_trade(token_id, price, size, "SELL")
 
@@ -124,23 +153,25 @@ class PolymarketTrader:
 
         try:
             from py_clob_client.order_builder.constants import SELL
-            from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            import math
+            from py_clob_client.clob_types import OrderArgs
 
-            # Use clean dollar amount and let CLOB resolve the price from order book
-            amount = math.floor(price * size * 100) / 100
+            # Get best bid price and tick size from order book
+            book_price, market_tick = self._get_book_price(token_id, "SELL")
+            if book_price <= 0:
+                return OrderResult(success=False, error_msg="No bids in order book")
 
-            order_args = MarketOrderArgs(
+            # Round to market precision
+            clean_price, clean_size = self._round_for_tick(book_price, size, market_tick)
+
+            order_args = OrderArgs(
                 token_id=token_id,
-                amount=amount,
+                price=clean_price,
+                size=clean_size,
                 side=SELL,
-                order_type=OrderType.FOK,
             )
 
-            signed_order = self._clob_client.create_market_order(order_args)
-            resp = self._clob_client.post_order(signed_order)
-
-            return self._parse_order_response(resp, token_id, price, size, "sell_order_placed")
+            signed_order = self._clob_client.create_and_post_order(order_args)
+            return self._parse_order_response(signed_order, token_id, clean_price, clean_size, "sell_order_placed")
 
         except Exception as exc:  # noqa: BLE001
             log.error("sell_order_error", token_id=token_id[:16], price=price, size=size, error=str(exc))

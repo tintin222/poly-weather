@@ -222,7 +222,9 @@ async def _enriched_yes_tick(
 
             executed_count = 0
             yes_placed_this_run = False
-            trader = PolymarketTrader(settings)
+            # Enriched bots always paper trade for A/B comparison
+            paper_settings = settings.model_copy(update={"paper_mode": True})
+            trader = PolymarketTrader(paper_settings)
             bot_cfg = _load_bot_settings(db.conn, bot_name)
             _bracket_prices = {b["label"]: b["yes_price"] for b in brackets}
 
@@ -436,7 +438,9 @@ async def _enriched_no_tick(
             )
 
             executed_count = 0
-            trader = PolymarketTrader(settings)
+            # Enriched bots always paper trade for A/B comparison
+            paper_settings = settings.model_copy(update={"paper_mode": True})
+            trader = PolymarketTrader(paper_settings)
             no_cfg = _load_bot_settings(db.conn, bot_name)
             _market_leader = max(brackets, key=lambda b: b["yes_price"])["label"] if brackets else ""
 

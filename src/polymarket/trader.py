@@ -54,10 +54,12 @@ class PolymarketTrader:
             raise
 
     def _get_book_price(self, token_id: str, side: str) -> tuple[float, str]:
-        """Get the best price from the order book and the market's tick size.
+        """Get an aggressive price from the order book for guaranteed fill.
 
-        For BUY: returns best ask (lowest sell offer) — we match it to fill instantly.
-        For SELL: returns best bid (highest buy offer).
+        For BUY: returns best ask + 2% buffer (willing to pay slightly more).
+        For SELL: returns best bid - 2% buffer (willing to accept slightly less).
+        The buffer ensures the order fills even if the book moves slightly.
+        Capped at 0.99 for buys and 0.01 for sells.
         Returns (price, tick_size_str).
         """
         book = self._clob_client.get_order_book(token_id)
@@ -65,10 +67,16 @@ class PolymarketTrader:
 
         if side == "BUY":
             if book.asks:
-                return float(book.asks[0].price), tick
+                best_ask = float(book.asks[0].price)
+                # Pay up to 2% more than best ask to ensure fill
+                aggressive = min(best_ask * 1.02, 0.99)
+                return aggressive, tick
         else:
             if book.bids:
-                return float(book.bids[0].price), tick
+                best_bid = float(book.bids[0].price)
+                # Accept up to 2% less than best bid to ensure fill
+                aggressive = max(best_bid * 0.98, 0.01)
+                return aggressive, tick
 
         return 0.0, tick
 

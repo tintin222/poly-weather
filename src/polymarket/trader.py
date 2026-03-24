@@ -68,14 +68,14 @@ class PolymarketTrader:
         if side == "BUY":
             if book.asks:
                 best_ask = float(book.asks[0].price)
-                # Pay up to 2% more than best ask to ensure fill
-                aggressive = min(best_ask * 1.02, 0.99)
+                # Pay up to 1% more than best ask to ensure fill
+                aggressive = min(best_ask * 1.01, 0.99)
                 return aggressive, tick
         else:
             if book.bids:
                 best_bid = float(book.bids[0].price)
-                # Accept up to 2% less than best bid to ensure fill
-                aggressive = max(best_bid * 0.98, 0.01)
+                # Accept up to 1% less than best bid to ensure fill
+                aggressive = max(best_bid * 0.99, 0.01)
                 return aggressive, tick
 
         return 0.0, tick

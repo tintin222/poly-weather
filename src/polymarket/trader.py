@@ -61,14 +61,12 @@ class PolymarketTrader:
         tick_size: str = "0.01",
         neg_risk: bool = False,
     ) -> OrderResult:
-        """Place a limit buy order.
+        """Place a market buy order (FOK — fill-or-kill at current price).
 
         Args:
             token_id: The CLOB token ID to buy.
-            price: Limit price (0.0 - 1.0).
+            price: Price per share (used for cost calculation).
             size: Number of shares to buy.
-            tick_size: Minimum price increment ("0.01" or "0.001").
-            neg_risk: Whether the market uses negative risk.
 
         Returns:
             OrderResult with order details.
@@ -84,49 +82,21 @@ class PolymarketTrader:
 
         try:
             from py_clob_client.order_builder.constants import BUY
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.clob_types import MarketOrderArgs, OrderType
 
-            order_args = OrderArgs(
+            amount = round(price * size, 2)  # USDC to spend
+
+            order_args = MarketOrderArgs(
                 token_id=token_id,
-                price=price,
-                size=size,
+                amount=amount,
                 side=BUY,
+                order_type=OrderType.FOK,
             )
 
-            signed_order = self._clob_client.create_and_post_order(order_args)
+            signed_order = self._clob_client.create_market_order(order_args)
+            resp = self._clob_client.post_order(signed_order)
 
-            order_id = ""
-            status = "UNKNOWN"
-            success = False
-
-            if isinstance(signed_order, dict):
-                order_id = signed_order.get("orderID", signed_order.get("id", ""))
-                status = signed_order.get("status", "SUBMITTED")
-                success = signed_order.get("success", status != "ERROR")
-                error_msg = signed_order.get("errorMsg")
-            else:
-                # Some versions of the client return the response differently
-                order_id = str(signed_order) if signed_order else ""
-                status = "SUBMITTED"
-                success = bool(signed_order)
-                error_msg = None
-
-            log.info(
-                "order_placed",
-                order_id=order_id,
-                token_id=token_id[:16],
-                price=price,
-                size=size,
-                status=status,
-            )
-
-            return OrderResult(
-                order_id=order_id,
-                status=status,
-                success=success,
-                error_msg=error_msg,
-                is_paper=False,
-            )
+            return self._parse_order_response(resp, token_id, price, size, "order_placed")
 
         except Exception as exc:  # noqa: BLE001
             log.error("order_error", token_id=token_id[:16], price=price, size=size, error=str(exc))
@@ -143,7 +113,7 @@ class PolymarketTrader:
         tick_size: str = "0.01",
         neg_risk: bool = False,
     ) -> OrderResult:
-        """Place a limit sell order (close an existing position)."""
+        """Place a market sell order (FOK — fill-or-kill at current price)."""
         if self._paper_mode:
             return self._paper_trade(token_id, price, size, "SELL")
 
@@ -152,52 +122,50 @@ class PolymarketTrader:
 
         try:
             from py_clob_client.order_builder.constants import SELL
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.clob_types import MarketOrderArgs, OrderType
 
-            order_args = OrderArgs(
+            amount = round(price * size, 2)  # USDC value of shares to sell
+
+            order_args = MarketOrderArgs(
                 token_id=token_id,
-                price=price,
-                size=size,
+                amount=amount,
                 side=SELL,
+                order_type=OrderType.FOK,
             )
 
-            signed_order = self._clob_client.create_and_post_order(order_args)
+            signed_order = self._clob_client.create_market_order(order_args)
+            resp = self._clob_client.post_order(signed_order)
 
-            order_id = ""
-            status = "UNKNOWN"
-            success = False
-
-            if isinstance(signed_order, dict):
-                order_id = signed_order.get("orderID", signed_order.get("id", ""))
-                status = signed_order.get("status", "SUBMITTED")
-                success = signed_order.get("success", status != "ERROR")
-                error_msg = signed_order.get("errorMsg")
-            else:
-                order_id = str(signed_order) if signed_order else ""
-                status = "SUBMITTED"
-                success = bool(signed_order)
-                error_msg = None
-
-            log.info(
-                "sell_order_placed",
-                order_id=order_id,
-                token_id=token_id[:16],
-                price=price,
-                size=size,
-                status=status,
-            )
-
-            return OrderResult(
-                order_id=order_id,
-                status=status,
-                success=success,
-                error_msg=error_msg,
-                is_paper=False,
-            )
+            return self._parse_order_response(resp, token_id, price, size, "sell_order_placed")
 
         except Exception as exc:  # noqa: BLE001
             log.error("sell_order_error", token_id=token_id[:16], price=price, size=size, error=str(exc))
             return OrderResult(success=False, error_msg=str(exc))
+
+    def _parse_order_response(self, resp, token_id: str, price: float, size: float, log_event: str) -> OrderResult:
+        """Parse order response from CLOB API."""
+        order_id = ""
+        status = "UNKNOWN"
+        success = False
+        error_msg = None
+
+        if isinstance(resp, dict):
+            order_id = resp.get("orderID", resp.get("id", ""))
+            status = resp.get("status", "SUBMITTED")
+            success = resp.get("success", status != "ERROR")
+            error_msg = resp.get("errorMsg")
+        else:
+            order_id = str(resp) if resp else ""
+            status = "SUBMITTED"
+            success = bool(resp)
+
+        log.info(log_event, order_id=order_id, token_id=token_id[:16],
+                 price=price, size=size, status=status)
+
+        return OrderResult(
+            order_id=order_id, status=status, success=success,
+            error_msg=error_msg, is_paper=False,
+        )
 
     def get_open_orders(self) -> list[dict]:
         """Get all open orders.

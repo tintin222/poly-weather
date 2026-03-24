@@ -246,6 +246,10 @@ async def _enriched_yes_tick(
                     if old_sell_price > 0:
                         sell_order = trader.place_limit_sell(
                             token_id=pos["token_id"], price=old_sell_price, size=pos["size"])
+                        if not sell_order.success:
+                            log.warning("ENRICHED_SELL_FAILED", bot=bot_name, city=city_key,
+                                        bracket=pos["bracket_label"], error=sell_order.error_msg)
+                            continue
                         sell_pnl = round(old_sell_price * pos["size"] - pos["cost"], 2)
                         db.conn.execute(
                             "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",

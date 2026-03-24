@@ -2619,6 +2619,9 @@ async def startup():
                             if old_sell_price > 0:
                                 sell_order = trader.place_limit_sell(
                                     token_id=_claude_pos["token_id"], price=old_sell_price, size=_claude_pos["size"])
+                                if not sell_order.success:
+                                    log.warning("SELL_FAILED", city=city_key, bracket=_claude_pos["bracket_label"], error=sell_order.error_msg)
+                                    continue
                                 sell_pnl = round(old_sell_price * _claude_pos["size"] - _claude_pos["cost"], 2)
                                 db.conn.execute(
                                     "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",
@@ -2871,6 +2874,9 @@ async def startup():
                             if old_sell_price > 0:
                                 sell_order = trader.place_limit_sell(
                                     token_id=_gpt_pos["token_id"], price=old_sell_price, size=_gpt_pos["size"])
+                                if not sell_order.success:
+                                    log.warning("SELL_FAILED", city=city_key, bracket=_gpt_pos["bracket_label"], error=sell_order.error_msg)
+                                    continue
                                 sell_pnl = round(old_sell_price * _gpt_pos["size"] - _gpt_pos["cost"], 2)
                                 db.conn.execute(
                                     "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",
@@ -3121,6 +3127,9 @@ async def startup():
                             if old_sell_price > 0:
                                 sell_order = trader.place_limit_sell(
                                     token_id=_gemini_pos["token_id"], price=old_sell_price, size=_gemini_pos["size"])
+                                if not sell_order.success:
+                                    log.warning("SELL_FAILED", city=city_key, bracket=_gemini_pos["bracket_label"], error=sell_order.error_msg)
+                                    continue
                                 sell_pnl = round(old_sell_price * _gemini_pos["size"] - _gemini_pos["cost"], 2)
                                 db.conn.execute(
                                     "UPDATE bets SET won = 2, pnl = ?, resolved_at = ? WHERE id = ?",

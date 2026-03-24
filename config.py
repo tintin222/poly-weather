@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     poly_api_secret: str = ""
     poly_api_passphrase: str = ""
     poly_signature_type: int = 0  # 0=EOA, 1=POLY_PROXY
+    polygon_wallet_address: str = ""
 
     # Trading
     paper_mode: bool = True

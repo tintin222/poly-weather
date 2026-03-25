@@ -1363,7 +1363,7 @@ def _load_bot_settings(conn, bot_name: str) -> dict:
     if row:
         return dict(row)
     max_bet = 1.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_bet_usd"]
-    max_daily = 20.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
+    max_daily = 50.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
     conn.execute(
         "INSERT OR IGNORE INTO bot_settings (bot_name, min_confidence, max_bet_usd, max_daily_exposure, updated_at) VALUES (?, ?, ?, ?, ?)",
         (bot_name, _BOT_SETTINGS_DEFAULTS["min_confidence"], max_bet, max_daily, int(time.time())),
@@ -3734,15 +3734,15 @@ async def startup():
         except Exception as exc:
             log.error("auto_redeem_error", error=str(exc))
 
-    _scheduler.add_job(_run_auto_redeem, "interval", minutes=30, id="auto_redeem")
+    _scheduler.add_job(_run_auto_redeem, "interval", minutes=15, id="auto_redeem")
 
     # Test mode: cap all bets at $1, daily exposure at $20
     from config import settings as _cfg
     if _cfg.test_mode:
         db = get_db()
-        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 1.0, max_daily_exposure = 20.0")
+        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 1.0, max_daily_exposure = 50.0")
         db.conn.commit()
-        log.info("test_mode_active", msg="All bot_settings capped to $1 bet / $20 daily")
+        log.info("test_mode_active", msg="All bot_settings capped to $1 bet / $50 daily")
 
     _scheduler.start()
     log.info("scheduler_started")

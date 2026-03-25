@@ -1362,8 +1362,8 @@ def _load_bot_settings(conn, bot_name: str) -> dict:
     row = conn.execute("SELECT * FROM bot_settings WHERE bot_name = ?", (bot_name,)).fetchone()
     if row:
         return dict(row)
-    max_bet = 5.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_bet_usd"]
-    max_daily = 50.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
+    max_bet = 1.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_bet_usd"]
+    max_daily = 20.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
     conn.execute(
         "INSERT OR IGNORE INTO bot_settings (bot_name, min_confidence, max_bet_usd, max_daily_exposure, updated_at) VALUES (?, ?, ?, ?, ?)",
         (bot_name, _BOT_SETTINGS_DEFAULTS["min_confidence"], max_bet, max_daily, int(time.time())),
@@ -3652,13 +3652,97 @@ async def startup():
 
     register_enriched_jobs(_scheduler)
 
-    # Test mode: cap all bets at $1, daily exposure at $10
+    # Auto-redeem resolved winning positions every 30 minutes
+    async def _run_auto_redeem():
+        from config import settings as _cfg
+        if _cfg.paper_mode:
+            return
+        try:
+            import httpx
+            from web3 import Web3
+            from web3.middleware import ExtraDataToPOAMiddleware
+            from eth_account import Account
+
+            account = Account.from_key(_cfg.poly_private_key)
+            w3 = Web3(Web3.HTTPProvider("https://polygon-bor-rpc.publicnode.com"))
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+            NEG_RISK_ADAPTER = Web3.to_checksum_address("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296")
+            CTF = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            RPC = "https://polygon-bor-rpc.publicnode.com"
+
+            adapter_abi = [{
+                "inputs": [{"name": "conditionId", "type": "bytes32"}, {"name": "amounts", "type": "uint256[]"}],
+                "name": "redeemPositions", "outputs": [], "stateMutability": "nonpayable", "type": "function"
+            }]
+            adapter = w3.eth.contract(address=NEG_RISK_ADAPTER, abi=adapter_abi)
+
+            db = get_db()
+            won_bets = db.conn.execute("""
+                SELECT b.token_id, b.city_key, b.bracket_label, b.side,
+                       pb.condition_id, pb.clob_token_id_yes, pb.clob_token_id_no
+                FROM bets b
+                JOIN polymarket_events pe ON pe.city_key = b.city_key AND pe.date = b.date
+                JOIN polymarket_brackets pb ON pb.event_id = pe.event_id AND pb.bracket_label = b.bracket_label
+                WHERE b.won = 1 AND b.is_paper = 0
+                GROUP BY b.token_id
+            """).fetchall()
+
+            redeemed = 0
+            for bet in won_bets:
+                cid = bet["condition_id"]
+                yes_token = bet["clob_token_id_yes"]
+                no_token = bet["clob_token_id_no"]
+
+                yes_bal = no_bal = 0
+                for tid_str, is_yes in [(yes_token, True), (no_token, False)]:
+                    if not tid_str:
+                        continue
+                    call_data = "0x00fdd58e" + account.address[2:].lower().zfill(64) + hex(int(tid_str))[2:].zfill(64)
+                    resp = httpx.post(RPC, json={"jsonrpc":"2.0","method":"eth_call","params":[{"to":CTF,"data":call_data},"latest"],"id":1}, timeout=15)
+                    bal = int(resp.json().get("result", "0x0"), 16)
+                    if is_yes:
+                        yes_bal = bal
+                    else:
+                        no_bal = bal
+
+                if yes_bal == 0 and no_bal == 0:
+                    continue
+
+                cid_bytes = bytes.fromhex(cid[2:66] if cid.startswith("0x") else cid[:64])
+                try:
+                    adapter.functions.redeemPositions(cid_bytes, [yes_bal, no_bal]).call({"from": account.address})
+                    nonce = w3.eth.get_transaction_count(account.address)
+                    tx = adapter.functions.redeemPositions(cid_bytes, [yes_bal, no_bal]).build_transaction({
+                        "from": account.address, "gas": 500000,
+                        "gasPrice": int(w3.eth.gas_price * 1.3),
+                        "nonce": nonce, "chainId": 137,
+                    })
+                    signed = account.sign_transaction(tx)
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                    amt = (yes_bal + no_bal) / 1e6
+                    log.info("auto_redeem_success", city=bet["city_key"], bracket=bet["bracket_label"], amount=round(amt, 2))
+                    redeemed += 1
+                    import asyncio
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass  # Not resolved yet or already redeemed — skip silently
+
+            if redeemed > 0:
+                log.info("auto_redeem_complete", positions_redeemed=redeemed)
+        except Exception as exc:
+            log.error("auto_redeem_error", error=str(exc))
+
+    _scheduler.add_job(_run_auto_redeem, "interval", minutes=30, id="auto_redeem")
+
+    # Test mode: cap all bets at $1, daily exposure at $20
     from config import settings as _cfg
     if _cfg.test_mode:
         db = get_db()
-        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 5.0, max_daily_exposure = 50.0")
+        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 1.0, max_daily_exposure = 20.0")
         db.conn.commit()
-        log.info("test_mode_active", msg="All bot_settings capped to $5 bet / $50 daily")
+        log.info("test_mode_active", msg="All bot_settings capped to $1 bet / $20 daily")
 
     _scheduler.start()
     log.info("scheduler_started")

@@ -1362,8 +1362,8 @@ def _load_bot_settings(conn, bot_name: str) -> dict:
     row = conn.execute("SELECT * FROM bot_settings WHERE bot_name = ?", (bot_name,)).fetchone()
     if row:
         return dict(row)
-    max_bet = 10.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_bet_usd"]
-    max_daily = 100.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
+    max_bet = 5.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_bet_usd"]
+    max_daily = 50.0 if _cfg.test_mode else _BOT_SETTINGS_DEFAULTS["max_daily_exposure"]
     conn.execute(
         "INSERT OR IGNORE INTO bot_settings (bot_name, min_confidence, max_bet_usd, max_daily_exposure, updated_at) VALUES (?, ?, ?, ?, ?)",
         (bot_name, _BOT_SETTINGS_DEFAULTS["min_confidence"], max_bet, max_daily, int(time.time())),
@@ -3656,9 +3656,9 @@ async def startup():
     from config import settings as _cfg
     if _cfg.test_mode:
         db = get_db()
-        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 10.0, max_daily_exposure = 100.0")
+        db.conn.execute("UPDATE bot_settings SET max_bet_usd = 5.0, max_daily_exposure = 50.0")
         db.conn.commit()
-        log.info("test_mode_active", msg="All bot_settings capped to $10 bet / $100 daily")
+        log.info("test_mode_active", msg="All bot_settings capped to $5 bet / $50 daily")
 
     _scheduler.start()
     log.info("scheduler_started")
